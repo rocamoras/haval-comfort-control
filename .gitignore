@@ -3,3 +3,4 @@ local.properties
 .kotlin/
 build/
 app/release.keystore
+app/release.keystore.base64
