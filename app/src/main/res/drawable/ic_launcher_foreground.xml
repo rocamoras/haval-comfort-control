@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Hardware Button icon — adaptive icon foreground
+  ViewBox 0..108  (108×108 dp canvas, safe area 18..90 = 72×72 dp)
+  Design: circular bezel + tick ring + LED dot (green #22C55E)
+  Note: VectorDrawable does not support <text>, so "AUTO / CLIMATE"
+        label is omitted here — it is present in the mipmap PNG fallbacks.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- ── Radial dish (dark gradient circle) ── -->
+    <path
+        android:pathData="M54,54m-42,0a42,42 0,1 1,84 0a42,42 0,1 1,-84 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="48"
+                android:gradientRadius="42"
+                android:startColor="#1a1a1a"
+                android:endColor="#050505"/>
+        </aapt:attr>
+    </path>
+
+    <!-- ── Outer bezel ring ── -->
+    <path
+        android:pathData="M54,54m-39,0a39,39 0,1 1,78 0a39,39 0,1 1,-78 0"
+        android:fillColor="#00000000"
+        android:strokeColor="#2DFFFFFF"
+        android:strokeWidth="0.7"/>
+
+    <!-- ── Inner machined ring ── -->
+    <path
+        android:pathData="M54,54m-33.5,0a33.5,33.5 0,1 1,67 0a33.5,33.5 0,1 1,-67 0"
+        android:fillColor="#00000000"
+        android:strokeColor="#0FFFFFFF"
+        android:strokeWidth="0.6"/>
+
+    <!-- ── Cardinal tick marks (N/S/E/W) ── -->
+    <path android:pathData="M54,17.5 L54,20.7" android:strokeColor="#1AFFFFFF" android:strokeWidth="0.7" android:strokeLineCap="round"/>
+    <path android:pathData="M54,87.3 L54,90.5" android:strokeColor="#1AFFFFFF" android:strokeWidth="0.7" android:strokeLineCap="round"/>
+    <path android:pathData="M17.5,54 L20.7,54" android:strokeColor="#1AFFFFFF" android:strokeWidth="0.7" android:strokeLineCap="round"/>
+    <path android:pathData="M87.3,54 L90.5,54" android:strokeColor="#1AFFFFFF" android:strokeWidth="0.7" android:strokeLineCap="round"/>
+
+    <!-- ── Intermediate ticks (30° steps) ── -->
+    <!-- 30° -->
+    <path android:pathData="M73.2,21.6 L74.9,24.4" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+    <!-- 60° -->
+    <path android:pathData="M86.4,34.8 L83.6,36.5" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+    <!-- 120° -->
+    <path android:pathData="M86.4,73.2 L83.6,71.5" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+    <!-- 150° -->
+    <path android:pathData="M73.2,86.4 L71.5,83.6" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+    <!-- 210° -->
+    <path android:pathData="M34.8,86.4 L36.5,83.6" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+    <!-- 240° -->
+    <path android:pathData="M21.6,73.2 L24.4,71.5" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+    <!-- 300° -->
+    <path android:pathData="M21.6,34.8 L24.4,36.5" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+    <!-- 330° -->
+    <path android:pathData="M34.8,21.6 L36.5,24.4" android:strokeColor="#0FFFFFFF" android:strokeWidth="0.55" android:strokeLineCap="round"/>
+
+    <!-- ── LED glow halo ── -->
+    <path
+        android:pathData="M54,28.2m-7.5,0a7.5,7.5 0,1 1,15 0a7.5,7.5 0,1 1,-15 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="28.2"
+                android:gradientRadius="7.5"
+                android:startColor="#8C22C55E"
+                android:endColor="#0022C55E"/>
+        </aapt:attr>
+    </path>
+
+    <!-- ── LED outer ring ── -->
+    <path
+        android:pathData="M54,28.2m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0"
+        android:fillColor="#1a1a1a"
+        android:strokeColor="#8022C55E"
+        android:strokeWidth="0.5"/>
+
+    <!-- ── LED dot (green) ── -->
+    <path
+        android:pathData="M54,28.2m-1.9,0a1.9,1.9 0,1 1,3.8 0a1.9,1.9 0,1 1,-3.8 0"
+        android:fillColor="#22C55E"/>
+
+    <!-- ── LED inner highlight ── -->
+    <path
+        android:pathData="M54,27.6m-0.65,0a0.65,0.65 0,1 1,1.3 0a0.65,0.65 0,1 1,-1.3 0"
+        android:fillColor="#a7f3c8"/>
+
+    <!-- ── Bottom ambient highlight ── -->
+    <path
+        android:pathData="M22,95 Q54,99 86,95 Q54,97 22,95Z"
+        android:fillColor="#06FFFFFF"/>
+
+</vector>
