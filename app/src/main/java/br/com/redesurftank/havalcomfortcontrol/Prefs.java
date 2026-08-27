@@ -18,7 +18,14 @@ public final class Prefs {
     // ── Funcionalidades ────────────────────────────────────────────────
     public static final String CLOSE_WINDOWS_ON_FOLD_MIRROR = "close_windows_on_fold_mirror";
     public static final String DISABLE_BLUETOOTH_ON_POWER_OFF = "disable_bluetooth_on_power_off";
-    public static final String DISABLE_HOTSPOT_ON_POWER_OFF   = "disable_hotspot_on_power_off";
+    /**
+     * Desliga o Wi-Fi DA CENTRAL ao desligar o carro. O nome antigo era
+     * "disable_hotspot", de quando eu tratava isso como o tethering do TBox — o
+     * objetivo real e derrubar o Android Auto sem fio, cujo link e um AP proprio da
+     * central, fora do caminho do tethering. Chave nova de proposito: a antiga
+     * controlava outra coisa.
+     */
+    public static final String DISABLE_WIFI_ON_POWER_OFF      = "disable_wifi_on_power_off";
     public static final String KEEP_DISTRACTION_DISABLED      = "keep_distraction_disabled";
     public static final String SET_STARTUP_VOLUME             = "set_startup_volume";
     public static final String STARTUP_VOLUME                 = "startup_volume";
@@ -26,10 +33,8 @@ public final class Prefs {
     // ── Estado interno (não aparece na UI) ─────────────────────────────
     /** Bluetooth estava ligado quando desligamos o carro → restaurar na próxima partida. */
     public static final String BT_RESTORE_PENDING      = "bt_restore_pending";
-    /** Idem para a âncora de Wi-Fi. */
-    public static final String HOTSPOT_RESTORE_PENDING = "hotspot_restore_pending";
-    /** Último estado da âncora visto por broadcast — fallback do getWifiApState(). */
-    public static final String HOTSPOT_LAST_KNOWN_ON   = "hotspot_last_known_on";
+    /** Wi-Fi estava ligado quando desligamos o carro → religar na próxima partida. */
+    public static final String WIFI_RESTORE_PENDING    = "wifi_restore_pending";
     /**
      * Volume inicial já aplicado neste ciclo de ignição. Sem isso, um restart do
      * serviço no meio da viagem jogaria o volume de volta para o configurado.
@@ -40,7 +45,7 @@ public final class Prefs {
     // ── Defaults ──────────────────────────────────────────────────────
     public static final boolean DEF_CLOSE_WINDOWS_ON_FOLD_MIRROR = true;
     public static final boolean DEF_DISABLE_BLUETOOTH            = true;
-    public static final boolean DEF_DISABLE_HOTSPOT              = true;
+    public static final boolean DEF_DISABLE_WIFI                 = true;
     public static final boolean DEF_KEEP_DISTRACTION_DISABLED    = true;
     public static final boolean DEF_SET_STARTUP_VOLUME           = true;
     public static final int     DEF_STARTUP_VOLUME               = 10;

@@ -13,15 +13,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.net.IConnectivityManager;
 import android.net.wifi.WifiManager;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Process;
-import android.os.ResultReceiver;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -72,14 +69,8 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private static final long SHIZUKU_BINDER_TIMEOUT_MS = 30_000;
     /** Coalesce de bursts de onDataChanged para o push de estado — so afeta a UI. */
     private static final long UI_PUSH_DEBOUNCE_MS = 120;
-    // WifiManager.WIFI_AP_STATE_* e as constantes da broadcast da ancora sao @hide:
-    // nao existem no SDK compilado, so no runtime da ROM. Copiadas como literais.
-    private static final String ACTION_WIFI_AP_STATE_CHANGED = "android.net.wifi.WIFI_AP_STATE_CHANGED";
-    private static final String EXTRA_WIFI_AP_STATE          = "wifi_state";
-    private static final int WIFI_AP_STATE_ENABLED  = 13;
-    private static final int WIFI_AP_STATE_ENABLING = 12;
-    /** ConnectivityManager.TETHERING_WIFI. */
-    private static final int TETHERING_WIFI = 0;
+    /** App de projecao do Android Auto sem fio, encerrado ao desligar o carro. */
+    private static final String ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead";
     /** Codigo do IVehicle no IBinderPool do VoiceAdapterService nesta ROM. */
     private static final int BINDER_POOL_VEHICLE = 6;
     /** IVehicle.setWindowStatus: 1 = vidro fechado. */
@@ -88,8 +79,8 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private static final String GEAR_PARK = "3";
     /** Janela para conferir se o pedido de Bluetooth realmente mudou o radio. */
     private static final long BT_VERIFY_DELAY_MS = 1_500;
-    /** Idem para a ancora — o stopTethering e assincrono. */
-    private static final long HOTSPOT_VERIFY_DELAY_MS = 3_000;
+    /** Idem para o Wi-Fi — svc wifi e assincrono. */
+    private static final long WIFI_VERIFY_DELAY_MS = 3_000;
 
     private static Method getServiceMethod;
 
@@ -132,7 +123,6 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
     private IIntelligentVehicleControlService controlService;
     private IVehicle             vehicle;
-    private IConnectivityManager connectivityManager;
     private SharedPreferences    prefs;
 
     /**
@@ -334,20 +324,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                         + " indisponivel: " + e);
             }
 
-            try {
-                connectivityManager = IConnectivityManager.Stub.asInterface(
-                        new ShizukuBinderWrapper(getServiceBinder(Context.CONNECTIVITY_SERVICE)));
-            } catch (Exception e) {
-                PersistentLog.e(TAG, "falha obtendo o IConnectivityManager — ancora ficara"
-                        + " indisponivel: " + e);
-            }
-
             Shizuku.addBinderDeadListener(this);
-            // SDK_INT no log porque o startTethering/stopTethering do
-            // IConnectivityManager foi removido no Android 11 (virou ITetheringConnector).
-            // Se a ancora nao responder, esta linha diz se e por isso.
             PersistentLog.w(TAG, "SDK_INT=" + android.os.Build.VERSION.SDK_INT
-                    + " connectivityManager=" + (connectivityManager != null ? "ok" : "NULO"));
+                    + " wifi=" + (isWifiOn() ? "on" : "off")
+                    + " androidAuto=" + (isPackageInstalled(ANDROID_AUTO_PACKAGE)
+                                         ? "instalado" : "NAO INSTALADO"));
             PersistentLog.w(TAG, "conectado ao veiculo — ready="
                     + dataCache.get(CarProps.DRIVING_READY)
                     + " mirror=" + dataCache.get(CarProps.MIRROR_FOLD)
@@ -385,7 +366,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         if (isReady) {
             applyStartupVolumeIfPending();
             restoreBluetoothIfPending();
-            restoreHotspotIfPending();
+            restoreWifiIfPending();
         } else {
             // Central ligada com o carro desligado: garante os radios desligados.
             applyPowerOff();
@@ -428,7 +409,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             // custa dezenas/centenas de ms. Volume primeiro, sempre.
             applyStartupVolumeIfPending();
             restoreBluetoothIfPending();
-            restoreHotspotIfPending();
+            restoreWifiIfPending();
         } else {
             PersistentLog.w(TAG, "veiculo desligado (driving_ready=" + value + ")");
             applyPowerOff();
@@ -492,15 +473,17 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             setBluetoothEnabled(false);
             log("carro desligado, Bluetooth desligado");
         }
-        if (prefs.getBoolean(Prefs.DISABLE_HOTSPOT_ON_POWER_OFF, Prefs.DEF_DISABLE_HOTSPOT)) {
-            // stopTethering incondicional (e idempotente): isHotspotOn() depende de uma
-            // API @hide e do ultimo broadcast visto, e um "nao sei" nao pode virar
-            // "deixa ligado". O estado lido decide apenas se religamos na partida.
-            boolean wasOn = isHotspotOn();
-            if (wasOn) prefs.edit().putBoolean(Prefs.HOTSPOT_RESTORE_PENDING, true).apply();
-            stopHotspot();
-            log(wasOn ? "carro desligado, ancora de Wi-Fi desligada"
-                      : "carro desligado, ancora de Wi-Fi conferida como desligada");
+        if (prefs.getBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF, Prefs.DEF_DISABLE_WIFI)) {
+            // Encerra a projecao ANTES de cortar o transporte, para a sessao terminar
+            // limpa em vez de o telefone ficar tentando reconectar num AP que caiu.
+            stopAndroidAuto();
+            if (isWifiOn()) {
+                prefs.edit().putBoolean(Prefs.WIFI_RESTORE_PENDING, true).apply();
+                setWifiEnabled(false);
+                log("carro desligado, Wi-Fi da central desligado");
+            } else {
+                log("carro desligado, Wi-Fi ja estava desligado");
+            }
         }
         pushUiState();
     }
@@ -518,14 +501,13 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         log("carro ligado, Bluetooth religado");
     }
 
-    private void restoreHotspotIfPending() {
-        if (!prefs.getBoolean(Prefs.DISABLE_HOTSPOT_ON_POWER_OFF,
-                Prefs.DEF_DISABLE_HOTSPOT)) return;
-        if (!prefs.getBoolean(Prefs.HOTSPOT_RESTORE_PENDING, false)) return;
-        prefs.edit().putBoolean(Prefs.HOTSPOT_RESTORE_PENDING, false).apply();
-        if (isHotspotOn()) return;
-        startHotspot();
-        log("carro ligado, ancora de Wi-Fi religada");
+    private void restoreWifiIfPending() {
+        if (!prefs.getBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF, Prefs.DEF_DISABLE_WIFI)) return;
+        if (!prefs.getBoolean(Prefs.WIFI_RESTORE_PENDING, false)) return;
+        prefs.edit().putBoolean(Prefs.WIFI_RESTORE_PENDING, false).apply();
+        if (isWifiOn()) return;
+        setWifiEnabled(true);
+        log("carro ligado, Wi-Fi da central religado");
     }
 
     /**
@@ -551,16 +533,16 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                         }
                         pushUiState();
                     });
-                } else if (ACTION_WIFI_AP_STATE_CHANGED.equals(action)) {
-                    int state = intent.getIntExtra(EXTRA_WIFI_AP_STATE, 0);
-                    boolean on = state == WIFI_AP_STATE_ENABLED || state == WIFI_AP_STATE_ENABLING;
-                    prefs.edit().putBoolean(Prefs.HOTSPOT_LAST_KNOWN_ON, on).apply();
-                    if (!on) return;
+                } else if (WifiManager.WIFI_STATE_CHANGED_ACTION.equals(action)) {
+                    int state = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE,
+                            WifiManager.WIFI_STATE_UNKNOWN);
+                    if (state != WifiManager.WIFI_STATE_ENABLED) return;
                     react.post(() -> {
-                        if (isCarOff() && prefs.getBoolean(Prefs.DISABLE_HOTSPOT_ON_POWER_OFF,
-                                Prefs.DEF_DISABLE_HOTSPOT)) {
-                            stopHotspot();
-                            log("ancora religou com o carro desligado, desligada de novo");
+                        if (isCarOff() && prefs.getBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF,
+                                Prefs.DEF_DISABLE_WIFI)) {
+                            stopAndroidAuto();
+                            setWifiEnabled(false);
+                            log("Wi-Fi religou com o carro desligado, desligado de novo");
                         }
                         pushUiState();
                     });
@@ -568,7 +550,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             }
         };
         IntentFilter filter = new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED);
-        filter.addAction(ACTION_WIFI_AP_STATE_CHANGED);
+        filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         ContextCompat.registerReceiver(this, radioGuardReceiver, filter,
                 ContextCompat.RECEIVER_EXPORTED);
     }
@@ -641,125 +623,105 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     /**
-     * Liga/desliga o Bluetooth e CONFERE o resultado.
+     * Liga/desliga o Bluetooth. O `svc` via Shizuku e o caminho PRINCIPAL.
      *
-     * BluetoothAdapter.enable()/disable() continua vindo primeiro por ser o caminho
-     * rapido: resolve dentro do processo, sem criar shell, e religar na partida com o
-     * minimo de atraso e requisito.
+     * Historia disso, porque a ordem aqui e o bug que foi para o campo: o app-tool
+     * (referencia comprovada nesta central) usa exclusivamente
+     * `svc bluetooth enable|disable`, e nem declara BLUETOOTH_ADMIN — ou seja,
+     * BluetoothAdapter.enable()/disable() nunca foi opcao lá. Eu inverti a ordem para
+     * ganhar latencia, e o adapter devolve true significando "pedido aceito", nao
+     * "radio mudou": nesta ROM o pedido e engolido, o true satisfazia o if, e o
+     * fallback nunca acontecia. O Bluetooth simplesmente nao desligava.
      *
-     * O que mudou depois do teste em campo: o retorno desses metodos nao decide mais
-     * nada. Eles devolvem true significando "o pedido foi aceito", nao "o radio
-     * mudou" — e nesta ROM o pedido e engolido. A versao anterior fazia
-     * `if (adapter.disable()) return;`, entao o true mentiroso impedia o fallback
-     * para o `svc`, que e o caminho que o app-tool usa e funciona. Resultado: o
-     * Bluetooth simplesmente nao desligava. Agora conferimos o estado real depois de
-     * {@link #BT_VERIFY_DELAY_MS} e corrigimos pelo shell se preciso.
+     * Agora o comprovado vem primeiro e sem espera. O adapter ficou como segunda
+     * tentativa, exercitada apenas se a conferencia mostrar que o svc nao pegou.
      */
     private void setBluetoothEnabled(boolean enabled) {
-        try {
-            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter != null) {
-                if (enabled) adapter.enable(); else adapter.disable();
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "BluetoothAdapter." + (enabled ? "enable" : "disable")
-                    + "() indisponivel (" + t + ")");
+        ShizukuUtils.ShellResult r = ShizukuUtils.run(
+                new String[]{"svc", "bluetooth", enabled ? "enable" : "disable"});
+        if (!r.ok()) {
+            PersistentLog.e(TAG, "svc bluetooth " + (enabled ? "enable" : "disable")
+                    + " falhou: " + r.describeFailure());
         }
         react.postDelayed(() -> {
             if (isBluetoothOn() == enabled) return;
             PersistentLog.w(TAG, "Bluetooth nao " + (enabled ? "ligou" : "desligou")
-                    + " pelo adapter — usando svc via Shizuku");
-            ShizukuUtils.ShellResult r = ShizukuUtils.run(
-                    new String[]{"svc", "bluetooth", enabled ? "enable" : "disable"});
-            if (!r.ok()) {
-                PersistentLog.e(TAG, "svc bluetooth " + (enabled ? "enable" : "disable")
-                        + " falhou: " + r.describeFailure());
+                    + " pelo svc — tentando pelo BluetoothAdapter");
+            try {
+                BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+                if (adapter != null) {
+                    if (enabled) adapter.enable(); else adapter.disable();
+                }
+            } catch (Throwable t) {
+                PersistentLog.e(TAG, "BluetoothAdapter tambem indisponivel: " + t);
             }
         }, BT_VERIFY_DELAY_MS);
     }
 
+    /** Diz se o pacote existe — usado para logar se o Android Auto esta instalado. */
+    private boolean isPackageInstalled(String pkg) {
+        try {
+            getPackageManager().getPackageInfo(pkg, 0);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /**
-     * getWifiApState() e @hide (liberado pelo HiddenApiBypass em App.onCreate). Se a
-     * reflexao falhar, cai no ultimo estado visto pelo broadcast — persistido, para
-     * sobreviver a um restart do servico.
+     * Liga/desliga o Wi-Fi DA CENTRAL, com conferencia e fallback.
+     *
+     * Por que Wi-Fi e nao tethering: o objetivo e derrubar a sessao do Android Auto
+     * sem fio quando o carro desliga (a central fica ligada alguns minutos e o
+     * telefone continuava conectado). O link do AAW e um AP proprio da central —
+     * LocalOnlyHotspot / softAP do servico de projecao — que NAO passa pelo
+     * stopTethering do IConnectivityManager. Era por isso que a versao anterior nao
+     * surtia efeito: desligava um AP que nao era o que sustentava a conexao.
+     *
+     * Aqui o estado tem API publica de verdade (WifiManager.isWifiEnabled()), sem
+     * reflexao em metodo @hide e sem codigo de transacao AIDL fixo.
      */
-    private boolean isHotspotOn() {
+    private void setWifiEnabled(boolean enabled) {
+        ShizukuUtils.ShellResult r = ShizukuUtils.run(
+                new String[]{"svc", "wifi", enabled ? "enable" : "disable"});
+        if (!r.ok()) {
+            PersistentLog.e(TAG, "svc wifi " + (enabled ? "enable" : "disable")
+                    + " falhou: " + r.describeFailure());
+        }
+        react.postDelayed(() -> {
+            if (isWifiOn() == enabled) return;
+            PersistentLog.w(TAG, "Wi-Fi nao " + (enabled ? "ligou" : "desligou")
+                    + " pelo svc — tentando cmd wifi");
+            ShizukuUtils.ShellResult r2 = ShizukuUtils.run(new String[]{
+                    "cmd", "wifi", "set-wifi-enabled", enabled ? "enabled" : "disabled"});
+            PersistentLog.w(TAG, "cmd wifi set-wifi-enabled -> " + r2.describeFailure());
+        }, WIFI_VERIFY_DELAY_MS);
+    }
+
+    /** WifiManager.isWifiEnabled() — API publica, ao contrario do getWifiApState(). */
+    private boolean isWifiOn() {
         try {
             WifiManager wm = (WifiManager) getApplicationContext()
                     .getSystemService(Context.WIFI_SERVICE);
-            if (wm != null) {
-                int state = (int) WifiManager.class.getMethod("getWifiApState").invoke(wm);
-                return state == WIFI_AP_STATE_ENABLED || state == WIFI_AP_STATE_ENABLING;
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "getWifiApState indisponivel (" + t + "), usando o ultimo estado visto");
+            return wm != null && wm.isWifiEnabled();
+        } catch (Exception e) {
+            return false;
         }
-        return prefs.getBoolean(Prefs.HOTSPOT_LAST_KNOWN_ON, false);
     }
 
-    private void stopHotspot() {
-        if (connectivityManager == null) {
-            PersistentLog.e(TAG, "IConnectivityManager nulo — a ancora nao pode ser desligada");
-            return;
-        }
-        try {
-            connectivityManager.stopTethering(TETHERING_WIFI, getPackageName());
-            PersistentLog.w(TAG, "stopTethering enviado (pkg=" + getPackageName() + ")");
-        } catch (Exception e) {
-            PersistentLog.e(TAG, "erro desligando a ancora: " + e);
-            return;
-        }
-        // stopTethering nao devolve resultado. Sem esta conferencia, uma ROM que
-        // ignora a chamada fica indistinguivel de sucesso no log — foi o que deixou
-        // "a ancora nao desliga" sem explicacao no primeiro teste em campo.
-        react.postDelayed(() -> {
-            if (!isHotspotOn()) return;
-            PersistentLog.e(TAG, "a ancora CONTINUA ligada "
-                    + (HOTSPOT_VERIFY_DELAY_MS / 1000) + "s apos o stopTethering"
-                    + " — tentando pelo shell");
-            // Segundo caminho, por shell. O IConnectivityManager.stopTethering vive de
-            // codigos de transacao fixos (23/24) e foi movido para o
-            // ITetheringConnector no Android 11, entao ele pode simplesmente cair no
-            // vazio nesta ROM. O `cmd wifi stop-softap` fala com o WifiService atual.
-            for (String[] cmd : new String[][]{
-                    {"cmd", "-w", "wifi", "stop-softap"},
-                    {"cmd", "wifi", "stop-softap"},
-                    {"cmd", "connectivity", "stop-tethering", "wifi"}}) {
-                ShizukuUtils.ShellResult r = ShizukuUtils.run(cmd);
-                PersistentLog.w(TAG, String.join(" ", cmd) + " -> " + r.describeFailure());
-                if (r.ok()) break;
-            }
-        }, HOTSPOT_VERIFY_DELAY_MS);
-    }
-
-    private void startHotspot() {
-        if (connectivityManager == null) return;
-        try {
-            ResultReceiver receiver = new ResultReceiver(mainHandler) {
-                @Override
-                protected void onReceiveResult(int resultCode, Bundle resultData) {
-                    if (resultCode != 0) {
-                        PersistentLog.e(TAG, "startTethering falhou com codigo " + resultCode);
-                    }
-                }
-            };
-            connectivityManager.startTethering(TETHERING_WIFI, receiver, false, getPackageName());
-        } catch (Exception e) {
-            PersistentLog.e(TAG, "erro ligando a ancora: " + e);
-            return;
-        }
-        react.postDelayed(() -> {
-            if (isHotspotOn()) return;
-            PersistentLog.e(TAG, "a ancora NAO ligou apos o startTethering"
-                    + " — tentando pelo shell");
-            for (String[] cmd : new String[][]{
-                    {"cmd", "-w", "wifi", "start-softap"},
-                    {"cmd", "connectivity", "start-tethering", "wifi"}}) {
-                ShizukuUtils.ShellResult r = ShizukuUtils.run(cmd);
-                PersistentLog.w(TAG, String.join(" ", cmd) + " -> " + r.describeFailure());
-                if (r.ok()) break;
-            }
-        }, HOTSPOT_VERIFY_DELAY_MS);
+    /**
+     * Encerra o app de projecao antes de tirar o Wi-Fi debaixo dele.
+     *
+     * Sem isso o telefone perde o transporte com a sessao ativa e fica tentando
+     * reconectar; com o force-stop a sessao termina de forma limpa. O pacote e o
+     * Android Auto do Google, confirmado pelo usuario — se nao estiver instalado, o
+     * am reclama e o log registra, sem afetar o resto.
+     */
+    private void stopAndroidAuto() {
+        ShizukuUtils.ShellResult r = ShizukuUtils.run(
+                new String[]{"am", "force-stop", ANDROID_AUTO_PACKAGE});
+        PersistentLog.w(TAG, "am force-stop " + ANDROID_AUTO_PACKAGE + " -> "
+                + r.describeFailure());
     }
 
     private void updateData(String key, String value) {
@@ -808,13 +770,13 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         final String mirror  = dataCache.get(CarProps.MIRROR_FOLD);
         final String volume  = dataCache.get(CarProps.MEDIA_VOLUME);
         final boolean bt      = isBluetoothOn();
-        final boolean hotspot = isHotspotOn();
+        final boolean wifi    = isWifiOn();
         mainHandler.post(() -> {
             ComfortStateHolder holder = ComfortStateHolder.INSTANCE;
             holder.setVehicleValue(CarProps.DRIVING_READY, ready);
             holder.setVehicleValue(CarProps.MIRROR_FOLD, mirror);
             holder.setVehicleValue(CarProps.MEDIA_VOLUME, volume);
-            holder.setRadios(bt, hotspot);
+            holder.setRadios(bt, wifi);
         });
     }
 

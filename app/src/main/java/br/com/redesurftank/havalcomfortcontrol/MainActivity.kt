@@ -113,9 +113,9 @@ private fun ComfortScreen() {
         mutableStateOf(prefs.getBoolean(
             Prefs.DISABLE_BLUETOOTH_ON_POWER_OFF, Prefs.DEF_DISABLE_BLUETOOTH))
     }
-    var disableHotspot by remember {
+    var disableWifi by remember {
         mutableStateOf(prefs.getBoolean(
-            Prefs.DISABLE_HOTSPOT_ON_POWER_OFF, Prefs.DEF_DISABLE_HOTSPOT))
+            Prefs.DISABLE_WIFI_ON_POWER_OFF, Prefs.DEF_DISABLE_WIFI))
     }
     var keepDistractionOff by remember {
         mutableStateOf(prefs.getBoolean(
@@ -271,7 +271,7 @@ private fun ComfortScreen() {
             Spacer(Modifier.width(10.dp))
             StatusChip("Bluetooth", state.bluetoothOn)
             Spacer(Modifier.width(10.dp))
-            StatusChip("Âncora", state.hotspotOn)
+            StatusChip("Wi-Fi", state.wifiOn)
             Spacer(Modifier.width(20.dp))
             Button(
                 onClick = {
@@ -336,22 +336,22 @@ private fun ComfortScreen() {
             )
             FeatureCard(
                 modifier = Modifier.weight(1f),
-                title = "Rádios ao desligar",
-                description = "Desliga Bluetooth e âncora de Wi-Fi quando o carro é "
-                        + "desligado, e religa o que estava ligado assim que a "
-                        + "central volta.",
+                title = "Desconectar ao desligar",
+                description = "Ao desligar o carro, encerra o Android Auto e desliga "
+                        + "Bluetooth e Wi-Fi da central — a central fica ligada alguns "
+                        + "minutos e o telefone continuava conectado. Religa na partida.",
                 checked = disableBluetooth,
                 onCheckedChange = {
                     disableBluetooth = it
                     prefs.edit().putBoolean(Prefs.DISABLE_BLUETOOTH_ON_POWER_OFF, it).apply()
                 },
                 checkedLabel = "Bluetooth",
-                secondChecked = disableHotspot,
+                secondChecked = disableWifi,
                 onSecondCheckedChange = {
-                    disableHotspot = it
-                    prefs.edit().putBoolean(Prefs.DISABLE_HOTSPOT_ON_POWER_OFF, it).apply()
+                    disableWifi = it
+                    prefs.edit().putBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF, it).apply()
                 },
-                secondCheckedLabel = "Âncora de Wi-Fi"
+                secondCheckedLabel = "Wi-Fi da central"
             )
             FeatureCard(
                 modifier = Modifier.weight(1f),

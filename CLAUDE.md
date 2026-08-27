@@ -24,10 +24,13 @@ O requisito é "sem delay" na partida. O que foi feito por isso:
 - Reações rodam numa `HandlerThread` em `THREAD_PRIORITY_DISPLAY`, sem debounce.
   O debounce de 120 ms existe só para o push de estado da UI.
 - Na transição de `car.basic.driving_ready_state` para ligado, a ordem é **volume →
-  Bluetooth → âncora**. Volume é uma chamada de binder e resolve na hora; os rádios
-  podem cair no `svc` via Shizuku, que custa muito mais.
-- Bluetooth usa `BluetoothAdapter.enable()/disable()` primeiro (in-process) e só cai
-  para `svc bluetooth` via Shizuku se isso falhar.
+  Bluetooth → Wi-Fi**. Volume é uma chamada de binder e resolve na hora; os rádios vão
+  pelo `svc` via Shizuku, que cria processo e custa muito mais.
+- Bluetooth usa `svc bluetooth` via Shizuku como caminho principal, com conferência
+  1,5 s depois e o `BluetoothAdapter` como segunda tentativa. **Não inverter essa
+  ordem**: `adapter.disable()` devolve `true` significando "pedido aceito", não "rádio
+  mudou", e nesta ROM o pedido é engolido — foi exatamente esse `true` mentiroso que
+  fez o Bluetooth não desligar na v1.0.0.
 - Todas as preferências ficam em **storage device-protected** (`comfort_prefs`),
   porque o serviço é `directBootAware` e lê no `LOCKED_BOOT_COMPLETED`, antes do
   unlock. Em credential storage o volume inicial leria o default em todo boot frio.
@@ -52,14 +55,38 @@ da Release no GitHub. As tags precisam casar exatamente (`v1.0.1` para
 | Propriedade | Uso |
 |---|---|
 | `car.drive.setting.outside_view_mirror_fold_state` | `0` = retrovisores rebatidos → fecha vidros |
-| `car.basic.vehicle_speed` / `car.basic.gear_status` | guarda: só fecha com velocidade 0 e marcha P (`3`) |
+| `car.basic.vehicle_speed` | guarda: nunca fecha com o carro em movimento |
+| `car.basic.gear_status` | guarda: exige P (`3`) **só com o carro ligado** — desligado o valor é indefinido, e exigir P ali quebrava o caso normal (rebater ao travar e sair) |
 | `car.basic.driving_ready_state` | `-1`/`0` = desligado; outro = ligado |
 | `car.frs_setting.distraction_detection_enable` | `1` = aviso ativo → desliga |
 | `sys.settings.audio.media_volume` | volume inicial |
 
+## Android Auto sem fio (funcionalidade 2)
+
+O objetivo real dessa funcionalidade é derrubar a sessão do **Android Auto sem fio**
+quando o carro desliga — a central fica ligada alguns minutos e o telefone continuava
+conectado.
+
+O link do AAW **não passa pelo tethering do Android**: é um AP próprio da central
+(LocalOnlyHotspot / softAP do serviço de projeção). Por isso
+`IConnectivityManager.stopTethering`, que é o que o app-tool usa, não resolve — ele
+desliga outro AP. Os `.aidl` de `IConnectivityManager`/`ResultReceiver` foram removidos
+do projeto por isso.
+
+O caminho atual é: `am force-stop com.google.android.projection.gearhead`, depois
+`svc wifi disable`, religando na partida. O estado do Wi-Fi tem API pública
+(`WifiManager.isWifiEnabled()`), sem reflexão em `@hide`.
+
+A ROM **não tem** nenhuma propriedade sobre projeção/Android Auto — varri as 800+
+chaves do `CarConstants` do app-tool. `sys.network.hotspot_state` e
+`car.configure.mobile_bluetooth_key` existem no catálogo mas são código morto lá, e
+não servem para isso.
+
 Vidros vão pelo `IVehicle` (`getWindowsStatus`/`setWindowStatus`, `1` = fechado),
-obtido do `IBinderPool` do `VoiceAdapterService` em `queryBinder(6)`. A âncora vai
-pelo `IConnectivityManager` (`startTethering`/`stopTethering`, tipo `0`).
+obtido do `IBinderPool` do `VoiceAdapterService` em `queryBinder(6)`. Esse binder é
+**re-adquirido sob demanda**: o `VoiceAdapterService` reinicia sozinho e leva o binder
+com ele, sem que nada nos avise — guardar o do init fazia o fechamento falhar em
+silêncio até o próximo boot.
 
 **Não reordenar métodos nos `.aidl`**: a ordem define os códigos de transação e tem
 que casar com o serviço do outro lado na ROM.

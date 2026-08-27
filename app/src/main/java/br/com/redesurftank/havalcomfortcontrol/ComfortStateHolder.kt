@@ -48,7 +48,7 @@ object ComfortStateHolder {
     var bluetoothOn by mutableStateOf(false)
         private set
 
-    var hotspotOn by mutableStateOf(false)
+    var wifiOn by mutableStateOf(false)
         private set
 
     /** Últimas ações do serviço, mais recente primeiro. Teto de 60 linhas. */
@@ -71,9 +71,9 @@ object ComfortStateHolder {
         }
     }
 
-    fun setRadios(bluetooth: Boolean, hotspot: Boolean) {
+    fun setRadios(bluetooth: Boolean, wifi: Boolean) {
         bluetoothOn = bluetooth
-        hotspotOn = hotspot
+        wifiOn = wifi
     }
 
     fun log(message: String) {
