@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -37,6 +39,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -56,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import br.com.redesurftank.havalcomfortcontrol.services.ComfortControlService
 import br.com.redesurftank.havalcomfortcontrol.ui.theme.HavalComfortControlTheme
+import br.com.redesurftank.havalcomfortcontrol.utils.PersistentLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -137,11 +141,24 @@ private fun ComfortScreen() {
     var showPermDialog   by remember { mutableStateOf(false) }
     var downloadJob      by remember { mutableStateOf<Job?>(null) }
 
+    // Diagnóstico: o log persistente é a única evidência que sobrevive a um restart do
+    // serviço, e sem uma forma de lê-lo na central o diagnóstico de campo é às cegas.
+    var showLogDialog by remember { mutableStateOf(false) }
+    var logText       by remember { mutableStateOf("") }
+    var savedPath     by remember { mutableStateOf("") }
+
     LaunchedEffect(Unit) {
         try {
             currentVersion = context.packageManager
                 .getPackageInfo(context.packageName, 0).versionName ?: "--"
         } catch (_: PackageManager.NameNotFoundException) {}
+    }
+
+    // Avisa o serviço quando vale espelhar estado na tela. Fora daqui ele não empurra
+    // nada — é o que impede o trabalho por segundo com o app em background.
+    DisposableEffect(Unit) {
+        ComfortStateHolder.uiVisible = true
+        onDispose { ComfortStateHolder.uiVisible = false }
     }
 
     fun installApk(file: File) {
@@ -257,6 +274,25 @@ private fun ComfortScreen() {
             StatusChip("Âncora", state.hotspotOn)
             Spacer(Modifier.width(20.dp))
             Button(
+                onClick = {
+                    showLogDialog = true
+                    savedPath = ""
+                    logText = "carregando…"
+                    scope.launch(Dispatchers.IO) {
+                        val dump = PersistentLog.dump(PersistentLog.DUMP_MAX_CHARS)
+                        withContext(Dispatchers.Main) {
+                            logText = dump.ifBlank { "(log vazio)" }
+                        }
+                    }
+                },
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF37474F)),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Log", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.width(10.dp))
+            Button(
                 onClick = { checkForUpdates() },
                 enabled = !isChecking && !isDownloading,
                 contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
@@ -346,8 +382,11 @@ private fun ComfortScreen() {
                     color = if (setStartupVolume) HmiAccent else HmiFgDim)
                 Slider(
                     value = startupVolume.toFloat(),
-                    onValueChange = { value ->
-                        startupVolume = value.toInt()
+                    // Só o estado em memória durante o arraste. Gravar a pref a cada
+                    // evento enfileirava uma escrita em disco por pixel arrastado —
+                    // centenas por segundo nesta central, e a UI travava junto.
+                    onValueChange = { value -> startupVolume = value.toInt() },
+                    onValueChangeFinished = {
                         prefs.edit().putInt(Prefs.STARTUP_VOLUME, startupVolume).apply()
                     },
                     valueRange = Prefs.VOLUME_MIN.toFloat()..Prefs.VOLUME_MAX.toFloat(),
@@ -394,6 +433,54 @@ private fun ComfortScreen() {
     }
 
     // ── Diálogos ──
+    if (showLogDialog) {
+        AlertDialog(
+            onDismissRequest = { showLogDialog = false },
+            title = { Text("Log de diagnóstico") },
+            text = {
+                Column {
+                    if (savedPath.isNotEmpty()) {
+                        Text("Salvo em: $savedPath", fontSize = 13.sp, color = HmiAccent)
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(360.dp)
+                            .background(Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            logText,
+                            fontSize = 12.sp,
+                            color = HmiFgMuted,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.verticalScroll(rememberScrollState())
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    // Cópia no diretório externo do app: é de onde dá para puxar por
+                    // gerenciador de arquivos ou adb pull, sem precisar de root.
+                    scope.launch(Dispatchers.IO) {
+                        val out = File(context.getExternalFilesDir(null), "diag.log")
+                        val ok = runCatching {
+                            out.writeText(PersistentLog.dump(PersistentLog.DUMP_MAX_CHARS))
+                        }.isSuccess
+                        withContext(Dispatchers.Main) {
+                            savedPath = if (ok) out.absolutePath else "falha ao salvar"
+                        }
+                    }
+                }) { Text("Salvar em arquivo") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogDialog = false }) { Text("Fechar") }
+            }
+        )
+    }
+
     if (showMsgDialog) {
         AlertDialog(
             onDismissRequest = { showMsgDialog = false },

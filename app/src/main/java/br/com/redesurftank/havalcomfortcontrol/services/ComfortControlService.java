@@ -86,6 +86,10 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private static final int WINDOW_CLOSED = 1;
     /** car.basic.gear_status: 3 = P. */
     private static final String GEAR_PARK = "3";
+    /** Janela para conferir se o pedido de Bluetooth realmente mudou o radio. */
+    private static final long BT_VERIFY_DELAY_MS = 1_500;
+    /** Idem para a ancora — o stopTethering e assincrono. */
+    private static final long HOTSPOT_VERIFY_DELAY_MS = 3_000;
 
     private static Method getServiceMethod;
 
@@ -145,14 +149,33 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
     private final Runnable uiPushRunnable = this::pushUiState;
 
+    /**
+     * Chaves que disparam acao. car.basic.vehicle_speed e car.basic.gear_status ficam
+     * DE FORA: eles existem apenas como guarda, lidos sob demanda em freshData().
+     *
+     * Isso e correcao de travamento, nao arrumacao. A velocidade muda varias vezes por
+     * segundo andando, e antes cada mudanca virava um post na thread react MAIS um
+     * pushUiState — que faz duas chamadas de binder (estado do Bluetooth e da ancora)
+     * e um post para a main thread com recomposicao do Compose. Dava um punhado de
+     * ciclos desses por segundo, sem parar, inclusive com o app em background.
+     */
+    private static boolean isActionableKey(String key) {
+        return CarProps.DRIVING_READY.equals(key)
+                || CarProps.MIRROR_FOLD.equals(key)
+                || CarProps.DISTRACTION.equals(key);
+    }
+
     private final IListener vehicleDataListener = new IListener.Stub() {
         @Override
         public void onDataChanged(String key, String value) {
             dataCache.put(key, value);
             // Sem debounce nas reacoes: o que atrasa a partida e justamente esperar.
-            react.post(() -> handleVehicleData(key, value));
-            react.removeCallbacks(uiPushRunnable);
-            react.postDelayed(uiPushRunnable, UI_PUSH_DEBOUNCE_MS);
+            if (isActionableKey(key)) react.post(() -> handleVehicleData(key, value));
+            // Espelhar na tela so vale se alguem estiver olhando.
+            if (ComfortStateHolder.INSTANCE.getUiVisible()) {
+                react.removeCallbacks(uiPushRunnable);
+                react.postDelayed(uiPushRunnable, UI_PUSH_DEBOUNCE_MS);
+            }
         }
     };
 
@@ -320,6 +343,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             }
 
             Shizuku.addBinderDeadListener(this);
+            // SDK_INT no log porque o startTethering/stopTethering do
+            // IConnectivityManager foi removido no Android 11 (virou ITetheringConnector).
+            // Se a ancora nao responder, esta linha diz se e por isso.
+            PersistentLog.w(TAG, "SDK_INT=" + android.os.Build.VERSION.SDK_INT
+                    + " connectivityManager=" + (connectivityManager != null ? "ok" : "NULO"));
             PersistentLog.w(TAG, "conectado ao veiculo — ready="
                     + dataCache.get(CarProps.DRIVING_READY)
                     + " mirror=" + dataCache.get(CarProps.MIRROR_FOLD)
@@ -421,10 +449,22 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         // Os retrovisores tambem recolhem em movimento em algumas configuracoes; sem
         // esta guarda o app subiria os vidros com o carro andando.
         float speed = parseFloat(freshData(CarProps.VEHICLE_SPEED), 0f);
-        String gear = freshData(CarProps.GEAR_STATUS);
-        if (speed > 0 || !GEAR_PARK.equals(gear)) {
-            Log.w(TAG, "retrovisores rebatidos ignorados (speed=" + speed + " gear=" + gear + ")");
+        if (speed > 0) {
+            log("retrovisores rebatidos IGNORADOS: carro em movimento (" + speed + ")");
             return;
+        }
+        // A marcha so e criterio com o carro LIGADO. No caso normal — rebater ao
+        // travar e sair — o carro ja esta desligado e o gear_status devolve valor
+        // parado/indefinido; exigir P ali era o que fazia a funcionalidade falhar "em
+        // alguns casos". Carro desligado nao anda, e a guarda de velocidade acima ja
+        // cobre o risco.
+        if (!isCarOff()) {
+            String gear = freshData(CarProps.GEAR_STATUS);
+            if (!GEAR_PARK.equals(gear)) {
+                log("retrovisores rebatidos IGNORADOS: carro ligado fora de P (gear="
+                        + gear + ")");
+                return;
+            }
         }
         if (closeAllWindows()) log("retrovisores rebatidos, vidros fechados");
     }
@@ -546,16 +586,44 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     // Atuadores
     // ─────────────────────────────────────────────────────────────
 
+    /**
+     * IVehicle sob demanda, re-adquirindo se o binder morreu.
+     *
+     * O VoiceAdapterService reinicia por conta propria e leva o binder com ele. Nada
+     * nos avisa: o INIT_COMPLETED que escutamos e do intelligentvehiclecontrol, outro
+     * servico. A versao anterior guardava o binder do init e seguia usando o cadaver,
+     * entao o fechamento dos vidros passava a falhar em silencio ate o proximo boot —
+     * que e o "nao funciona em todos os casos" visto no carro.
+     */
+    private IVehicle vehicle() {
+        try {
+            if (vehicle != null && vehicle.asBinder().isBinderAlive()) return vehicle;
+            IBinderPool pool = IBinderPool.Stub.asInterface(new ShizukuBinderWrapper(
+                    getServiceBinder("com.beantechs.voice.adapter.VoiceAdapterService")));
+            vehicle = IVehicle.Stub.asInterface(
+                    new ShizukuBinderWrapper(pool.queryBinder(BINDER_POOL_VEHICLE)));
+            PersistentLog.w(TAG, "IVehicle (re)adquirido");
+            return vehicle;
+        } catch (Exception e) {
+            PersistentLog.e(TAG, "falha obtendo o IVehicle: " + e);
+            return null;
+        }
+    }
+
     private boolean closeAllWindows() {
-        if (vehicle == null) {
+        IVehicle v = vehicle();
+        if (v == null) {
             PersistentLog.e(TAG, "IVehicle indisponivel — nao foi possivel fechar os vidros");
             return false;
         }
         try {
-            int[] status = vehicle.getWindowsStatus(0);
+            int[] status = v.getWindowsStatus(0);
+            StringBuilder antes = new StringBuilder();
+            for (int st : status) antes.append(st).append(' ');
             for (int i = 0; i < status.length; i++) {
-                if (status[i] != WINDOW_CLOSED) vehicle.setWindowStatus(i, WINDOW_CLOSED);
+                if (status[i] != WINDOW_CLOSED) v.setWindowStatus(i, WINDOW_CLOSED);
             }
+            PersistentLog.w(TAG, "vidros: estado antes = [" + antes.toString().trim() + "]");
             return true;
         } catch (Exception e) {
             PersistentLog.e(TAG, "erro fechando os vidros: " + e);
@@ -573,23 +641,41 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     /**
-     * BluetoothAdapter.enable()/disable() e o caminho rapido: resolve dentro do
-     * processo, sem criar um processo de shell. Foi por isso que ele vem primeiro —
-     * o requisito da funcionalidade 2 e religar o Bluetooth com o minimo de atraso
-     * na partida, e o `svc` via Shizuku custa dezenas/centenas de ms.
+     * Liga/desliga o Bluetooth e CONFERE o resultado.
      *
-     * O caminho lento fica como fallback porque enable()/disable() sao depreciados
-     * e viram no-op para apps nao privilegiados em ROMs mais novas (Android 13+).
+     * BluetoothAdapter.enable()/disable() continua vindo primeiro por ser o caminho
+     * rapido: resolve dentro do processo, sem criar shell, e religar na partida com o
+     * minimo de atraso e requisito.
+     *
+     * O que mudou depois do teste em campo: o retorno desses metodos nao decide mais
+     * nada. Eles devolvem true significando "o pedido foi aceito", nao "o radio
+     * mudou" — e nesta ROM o pedido e engolido. A versao anterior fazia
+     * `if (adapter.disable()) return;`, entao o true mentiroso impedia o fallback
+     * para o `svc`, que e o caminho que o app-tool usa e funciona. Resultado: o
+     * Bluetooth simplesmente nao desligava. Agora conferimos o estado real depois de
+     * {@link #BT_VERIFY_DELAY_MS} e corrigimos pelo shell se preciso.
      */
     private void setBluetoothEnabled(boolean enabled) {
         try {
             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter != null && (enabled ? adapter.enable() : adapter.disable())) return;
+            if (adapter != null) {
+                if (enabled) adapter.enable(); else adapter.disable();
+            }
         } catch (Throwable t) {
             Log.w(TAG, "BluetoothAdapter." + (enabled ? "enable" : "disable")
-                    + "() indisponivel (" + t + "), caindo para o svc via Shizuku");
+                    + "() indisponivel (" + t + ")");
         }
-        ShizukuUtils.run(new String[]{"svc", "bluetooth", enabled ? "enable" : "disable"});
+        react.postDelayed(() -> {
+            if (isBluetoothOn() == enabled) return;
+            PersistentLog.w(TAG, "Bluetooth nao " + (enabled ? "ligou" : "desligou")
+                    + " pelo adapter — usando svc via Shizuku");
+            ShizukuUtils.ShellResult r = ShizukuUtils.run(
+                    new String[]{"svc", "bluetooth", enabled ? "enable" : "disable"});
+            if (!r.ok()) {
+                PersistentLog.e(TAG, "svc bluetooth " + (enabled ? "enable" : "disable")
+                        + " falhou: " + r.describeFailure());
+            }
+        }, BT_VERIFY_DELAY_MS);
     }
 
     /**
@@ -612,12 +698,38 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     private void stopHotspot() {
-        if (connectivityManager == null) return;
+        if (connectivityManager == null) {
+            PersistentLog.e(TAG, "IConnectivityManager nulo — a ancora nao pode ser desligada");
+            return;
+        }
         try {
             connectivityManager.stopTethering(TETHERING_WIFI, getPackageName());
+            PersistentLog.w(TAG, "stopTethering enviado (pkg=" + getPackageName() + ")");
         } catch (Exception e) {
             PersistentLog.e(TAG, "erro desligando a ancora: " + e);
+            return;
         }
+        // stopTethering nao devolve resultado. Sem esta conferencia, uma ROM que
+        // ignora a chamada fica indistinguivel de sucesso no log — foi o que deixou
+        // "a ancora nao desliga" sem explicacao no primeiro teste em campo.
+        react.postDelayed(() -> {
+            if (!isHotspotOn()) return;
+            PersistentLog.e(TAG, "a ancora CONTINUA ligada "
+                    + (HOTSPOT_VERIFY_DELAY_MS / 1000) + "s apos o stopTethering"
+                    + " — tentando pelo shell");
+            // Segundo caminho, por shell. O IConnectivityManager.stopTethering vive de
+            // codigos de transacao fixos (23/24) e foi movido para o
+            // ITetheringConnector no Android 11, entao ele pode simplesmente cair no
+            // vazio nesta ROM. O `cmd wifi stop-softap` fala com o WifiService atual.
+            for (String[] cmd : new String[][]{
+                    {"cmd", "-w", "wifi", "stop-softap"},
+                    {"cmd", "wifi", "stop-softap"},
+                    {"cmd", "connectivity", "stop-tethering", "wifi"}}) {
+                ShizukuUtils.ShellResult r = ShizukuUtils.run(cmd);
+                PersistentLog.w(TAG, String.join(" ", cmd) + " -> " + r.describeFailure());
+                if (r.ok()) break;
+            }
+        }, HOTSPOT_VERIFY_DELAY_MS);
     }
 
     private void startHotspot() {
@@ -634,7 +746,20 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             connectivityManager.startTethering(TETHERING_WIFI, receiver, false, getPackageName());
         } catch (Exception e) {
             PersistentLog.e(TAG, "erro ligando a ancora: " + e);
+            return;
         }
+        react.postDelayed(() -> {
+            if (isHotspotOn()) return;
+            PersistentLog.e(TAG, "a ancora NAO ligou apos o startTethering"
+                    + " — tentando pelo shell");
+            for (String[] cmd : new String[][]{
+                    {"cmd", "-w", "wifi", "start-softap"},
+                    {"cmd", "connectivity", "start-tethering", "wifi"}}) {
+                ShizukuUtils.ShellResult r = ShizukuUtils.run(cmd);
+                PersistentLog.w(TAG, String.join(" ", cmd) + " -> " + r.describeFailure());
+                if (r.ok()) break;
+            }
+        }, HOTSPOT_VERIFY_DELAY_MS);
     }
 
     private void updateData(String key, String value) {
@@ -678,6 +803,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     // ─────────────────────────────────────────────────────────────
 
     private void pushUiState() {
+        if (!ComfortStateHolder.INSTANCE.getUiVisible()) return;
         final String ready   = dataCache.get(CarProps.DRIVING_READY);
         final String mirror  = dataCache.get(CarProps.MIRROR_FOLD);
         final String volume  = dataCache.get(CarProps.MEDIA_VOLUME);

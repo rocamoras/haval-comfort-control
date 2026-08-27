@@ -18,6 +18,17 @@ object ComfortStateHolder {
 
     private val stamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
+    /**
+     * A Activity está na frente. O serviço consulta isto antes de espelhar estado:
+     * com a tela fechada, empurrar dado nenhum é o comportamento certo, e evitar isso
+     * é o que tirou o serviço de um ciclo de trabalho por segundo em background.
+     *
+     * `@Volatile` e não `mutableStateOf` de propósito — quem lê são as threads do
+     * serviço, não o Compose.
+     */
+    @Volatile
+    var uiVisible: Boolean = false
+
     /** Serviço conectado ao IIntelligentVehicleControlService. */
     var connected by mutableStateOf(false)
         private set
