@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import br.com.redesurftank.havalcomfortcontrol.services.ComfortControlService
 import br.com.redesurftank.havalcomfortcontrol.ui.theme.HavalComfortControlTheme
+import br.com.redesurftank.havalcomfortcontrol.utils.LogUploader
 import br.com.redesurftank.havalcomfortcontrol.utils.PersistentLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -146,6 +147,9 @@ private fun ComfortScreen() {
     var showLogDialog by remember { mutableStateOf(false) }
     var logText       by remember { mutableStateOf("") }
     var savedPath     by remember { mutableStateOf("") }
+    var isUploading   by remember { mutableStateOf(false) }
+    var uploadStatus  by remember { mutableStateOf("") }
+    var uploadUrl     by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         try {
@@ -159,6 +163,27 @@ private fun ComfortScreen() {
     DisposableEffect(Unit) {
         ComfortStateHolder.uiVisible = true
         onDispose { ComfortStateHolder.uiVisible = false }
+    }
+
+    fun uploadLog() {
+        isUploading  = true
+        uploadUrl    = ""
+        uploadStatus = "Iniciando…"
+        scope.launch(Dispatchers.IO) {
+            val result = LogUploader.collectAndUpload(context) { msg ->
+                scope.launch(Dispatchers.Main) { uploadStatus = msg }
+            }
+            withContext(Dispatchers.Main) {
+                isUploading = false
+                when (result) {
+                    is LogUploader.Result.Ok -> {
+                        uploadUrl    = result.url
+                        uploadStatus = "Enviado (${result.sizeBytes / 1024} KB)"
+                    }
+                    is LogUploader.Result.Err -> uploadStatus = "Erro: ${result.message}"
+                }
+            }
+        }
     }
 
     fun installApk(file: File) {
@@ -447,6 +472,18 @@ private fun ComfortScreen() {
                         Text("Salvo em: $savedPath", fontSize = 13.sp, color = HmiAccent)
                         Spacer(Modifier.height(8.dp))
                     }
+                    if (uploadStatus.isNotEmpty()) {
+                        Text(uploadStatus, fontSize = 13.sp,
+                            color = if (uploadUrl.isNotEmpty()) HmiAccent else HmiFgMuted)
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    if (uploadUrl.isNotEmpty()) {
+                        // Selecionável para dar copiar-e-colar na central; é o link que
+                        // o usuário manda de volta.
+                        Text(uploadUrl, fontSize = 12.sp, color = HmiFg,
+                            fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.height(8.dp))
+                    }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -465,19 +502,29 @@ private fun ComfortScreen() {
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    // Cópia no diretório externo do app: é de onde dá para puxar por
-                    // gerenciador de arquivos ou adb pull, sem precisar de root.
-                    scope.launch(Dispatchers.IO) {
-                        val out = File(context.getExternalFilesDir(null), "diag.log")
-                        val ok = runCatching {
-                            out.writeText(PersistentLog.dump(PersistentLog.DUMP_MAX_CHARS))
-                        }.isSuccess
-                        withContext(Dispatchers.Main) {
-                            savedPath = if (ok) out.absolutePath else "falha ao salvar"
+                Row {
+                    TextButton(onClick = { uploadLog() }, enabled = !isUploading) {
+                        if (isUploading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(6.dp))
                         }
+                        Text("Enviar")
                     }
-                }) { Text("Salvar em arquivo") }
+                    TextButton(onClick = {
+                        // Cópia no diretório externo do app: é de onde dá para puxar por
+                        // gerenciador de arquivos ou adb pull, sem precisar de root.
+                        scope.launch(Dispatchers.IO) {
+                            val out = File(context.getExternalFilesDir(null), "diag.log")
+                            val ok = runCatching {
+                                out.writeText(PersistentLog.dump(PersistentLog.DUMP_MAX_CHARS))
+                            }.isSuccess
+                            withContext(Dispatchers.Main) {
+                                savedPath = if (ok) out.absolutePath else "falha ao salvar"
+                            }
+                        }
+                    }) { Text("Salvar") }
+                }
             },
             dismissButton = {
                 TextButton(onClick = { showLogDialog = false }) { Text("Fechar") }

@@ -117,6 +117,28 @@ silêncio até o próximo boot.
 **Não reordenar métodos nos `.aidl`**: a ordem define os códigos de transação e tem
 que casar com o serviço do outro lado na ROM.
 
+## Diagnóstico de campo
+
+Botão **Log** no cabeçalho abre o log persistente e oferece duas saídas:
+
+- **Enviar** → sobe para o Firebase Storage do projeto `havalenginereverse` (mesmo
+  bucket dos apps irmãos), em `logs/comfort_<timestamp>.txt`, e mostra a URL na tela
+- **Salvar** → grava em `Android/data/<pkg>/files/diag.log`, para `adb pull`
+
+`utils/LogUploader.kt` é uma **versão enxuta** do homônimo do climate-control (~530
+linhas → ~170): só cabeçalho + `PersistentLog.dump()`. O que ficou de fora — logcat,
+buffer de crash, eventos do ActivityManager, dumpsys — serve para investigar mortes de
+processo causadas pela ROM; aqui o `PersistentLog` já registra cada decisão do gatilho
+e cada comando de rádio com o resultado, que é o que responde às perguntas de campo.
+
+Usa a API REST do Firebase, não o SDK: o `google-services.json` daquele projeto lista
+apenas os applicationIds dele, e o plugin Gradle `google-services` falha com "No
+matching client found" para um pacote não registrado. REST não precisa de arquivo nem
+de dependência nova no Gradle.
+
+O cabeçalho **não** inclui identificadores do device (serial, IMEI, Android ID) — o
+link do bucket é público para quem o tem.
+
 ## Display do Multimídia Haval (medido em campo — 2026-05-10)
 
 | Campo | Valor |

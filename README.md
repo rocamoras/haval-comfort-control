@@ -32,6 +32,9 @@ Cada item tem seu interruptor na tela — todos vêm ligados.
 Botão **Atualizar** no cabeçalho: consulta a Release mais recente no GitHub, baixa o
 APK e abre o instalador.
 
+Botão **Log**: mostra o log de diagnóstico na tela, com **Enviar** (sobe para o
+Firebase e devolve uma URL) e **Salvar** (grava em `Android/data/<pkg>/files/diag.log`).
+
 ## Pré-requisito
 
 O `shizuku_server` precisa estar de pé, subido pelo **haval-climate-control** (ou pelo
