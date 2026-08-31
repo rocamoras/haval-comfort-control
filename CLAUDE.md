@@ -54,18 +54,43 @@ da Release no GitHub. As tags precisam casar exatamente (`v1.0.1` para
 
 | Propriedade | Uso |
 |---|---|
-| `car.drive.setting.outside_view_mirror_fold_state` | `0` = retrovisores rebatidos → fecha vidros |
-| `car.basic.vehicle_speed` | guarda: nunca fecha com o carro em movimento |
-| `car.basic.gear_status` | guarda: exige P (`3`) **só com o carro ligado** — desligado o valor é indefinido, e exigir P ali quebrava o caso normal (rebater ao travar e sair) |
+| `car.basic.door_lock_status` | **gatilho das funcionalidades 1 e 2**: `1` = trancado, `3` = destrancado |
+| `car.basic.engine_state` | `-1` e `15` = motor desligado (valores tirados do `isMainScreenOn()` e do `ProjectorManager` do app-tool) |
+| `car.basic.vehicle_speed` | guarda: nunca age com o carro em movimento |
+| `car.basic.gear_status` | guarda: exige P (`3`) |
 | `car.basic.driving_ready_state` | `-1`/`0` = desligado; outro = ligado |
 | `car.frs_setting.distraction_detection_enable` | `1` = aviso ativo → desliga |
 | `sys.settings.audio.media_volume` | volume inicial |
 
+## Gatilho das funcionalidades 1 e 2 — a tranca
+
+Fechar os vidros e desligar os rádios acontecem no **mesmo** evento: o carro foi
+**trancado** estando **em P** com o **motor desligado**.
+
+Os gatilhos anteriores foram descartados por serem imprecisos:
+
+| Gatilho antigo | Por que saiu |
+|---|---|
+| retrovisores rebatidos (vidros) | rebate em outras situações, e nem sempre rebate |
+| `driving_ready` → desligado (rádios) | desligar o carro não significa que alguém saiu — a central fica ligada minutos com o motorista dentro, e era aí que o Android Auto continuava conectado |
+
+A tranca é um evento **único**: se `door_lock_status=1` chegar antes de `engine_state`
+virar desligado, a condição falha e não haveria segunda chance naquele uso do carro.
+Por isso a avaliação se reagenda até 4 vezes a cada 3 s (`LOCK_RECHECK_*`). Assinar
+`engine_state` seria a alternativa, mas num híbrido ele muda toda hora por start-stop —
+seria churn constante para cobrir uma corrida de segundos.
+
+Dois flags de estado governam o ciclo:
+- `lockActionDone` — a ROM repete `door_lock_status=1`; sem isso cada repetição
+  refaria tudo. Zera ao destrancar e na partida.
+- `radiosOffByLock` — só enquanto true a guarda reverte um religamento de
+  Bluetooth/Wi-Fi. Impede de brigar com o usuário que destrancou e voltou.
+
 ## Android Auto sem fio (funcionalidade 2)
 
 O objetivo real dessa funcionalidade é derrubar a sessão do **Android Auto sem fio**
-quando o carro desliga — a central fica ligada alguns minutos e o telefone continuava
-conectado.
+quando o motorista sai e tranca o carro — a central fica ligada alguns minutos depois
+disso e o telefone continuava conectado.
 
 O link do AAW **não passa pelo tethering do Android**: é um AP próprio da central
 (LocalOnlyHotspot / softAP do serviço de projeção). Por isso
@@ -74,7 +99,8 @@ desliga outro AP. Os `.aidl` de `IConnectivityManager`/`ResultReceiver` foram re
 do projeto por isso.
 
 O caminho atual é: `am force-stop com.google.android.projection.gearhead`, depois
-`svc wifi disable`, religando na partida. O estado do Wi-Fi tem API pública
+`svc wifi disable`, religando na partida. O Wi-Fi da central **inteiro** cai — decisão
+do usuário, ciente de que a central fica sem Wi-Fi enquanto o carro está trancado. O estado do Wi-Fi tem API pública
 (`WifiManager.isWifiEnabled()`), sem reflexão em `@hide`.
 
 A ROM **não tem** nenhuma propriedade sobre projeção/Android Auto — varri as 800+

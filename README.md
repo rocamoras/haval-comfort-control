@@ -8,17 +8,19 @@ Termux/SSH, bootstrap do Shizuku, ~100 MB de recursos).
 
 ## Funcionalidades
 
-1. **Vidros ao rebater os retrovisores** — fecha todos os vidros quando os
-   retrovisores são recolhidos. Ignorado se o carro estiver em movimento ou fora de P.
-2. **Desconectar ao desligar** — a central fica ligada alguns minutos depois de o carro
-   desligar, e nesse tempo o Android Auto sem fio continuava conectado. Ao desligar o
-   carro o app encerra o app de projeção e desliga Bluetooth e Wi-Fi da central,
-   religando na partida o que estava ligado. Se a ROM religar um deles com o carro
-   desligado, o app desliga de novo.
+1. **Vidros ao trancar** — fecha todos os vidros quando o carro é trancado, estando em
+   P com o motor desligado.
+2. **Desconectar ao trancar** — no mesmo gatilho, encerra o Android Auto e desliga
+   Bluetooth e Wi-Fi da central, religando na partida o que estava ligado. Se a ROM
+   religar um deles enquanto o carro segue trancado, o app desliga de novo.
+
+   O gatilho é a **tranca**, não o desligar: a central fica ligada alguns minutos depois
+   de o carro desligar, e nesse tempo o Android Auto sem fio continuava conectado com o
+   motorista ainda dentro.
 
    O Wi-Fi da central inteiro é desligado de propósito: o link do Android Auto sem fio
    é um AP próprio da central, fora do caminho do tethering — `stopTethering` não o
-   alcança. Enquanto o carro estiver desligado, a central fica sem Wi-Fi.
+   alcança. Enquanto o carro estiver trancado, a central fica sem Wi-Fi.
 3. **Aviso de distrações** — mantém o aviso desligado, reagindo se a central o
    reativar sozinha.
 4. **Volume inicial** — define o volume da multimídia a cada partida (default `10`,

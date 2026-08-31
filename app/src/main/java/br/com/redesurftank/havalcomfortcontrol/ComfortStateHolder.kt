@@ -37,8 +37,8 @@ object ComfortStateHolder {
     var drivingReady by mutableStateOf<String?>(null)
         private set
 
-    /** Valor cru de car.drive.setting.outside_view_mirror_fold_state (0 = rebatidos). */
-    var mirrorFold by mutableStateOf<String?>(null)
+    /** Valor cru de car.basic.door_lock_status (1 = trancado, 3 = destrancado). */
+    var doorLock by mutableStateOf<String?>(null)
         private set
 
     /** Volume atual da multimídia, conforme o serviço do veículo. */
@@ -58,7 +58,7 @@ object ComfortStateHolder {
         connected = value
         if (!value) {
             drivingReady = null
-            mirrorFold = null
+            doorLock = null
             mediaVolume = null
         }
     }
@@ -66,7 +66,7 @@ object ComfortStateHolder {
     fun setVehicleValue(key: String, value: String?) {
         when (key) {
             CarProps.DRIVING_READY -> drivingReady = value
-            CarProps.MIRROR_FOLD   -> mirrorFold = value
+            CarProps.DOOR_LOCK     -> doorLock = value
             CarProps.MEDIA_VOLUME  -> mediaVolume = value
         }
     }

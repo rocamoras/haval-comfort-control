@@ -77,10 +77,28 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private static final int WINDOW_CLOSED = 1;
     /** car.basic.gear_status: 3 = P. */
     private static final String GEAR_PARK = "3";
+    /** car.basic.door_lock_status: 1 = trancado, 3 = destrancado. */
+    private static final String DOOR_LOCKED   = "1";
+    private static final String DOOR_UNLOCKED = "3";
+    /**
+     * car.basic.engine_state com motor desligado. Os dois valores vieram do app-tool,
+     * que trata -1 e 15 como carro desligado em isMainScreenOn() e no ProjectorManager.
+     */
+    private static final String[] ENGINE_OFF_VALUES = {"-1", "15"};
     /** Janela para conferir se o pedido de Bluetooth realmente mudou o radio. */
     private static final long BT_VERIFY_DELAY_MS = 1_500;
     /** Idem para o Wi-Fi — svc wifi e assincrono. */
     private static final long WIFI_VERIFY_DELAY_MS = 3_000;
+    /**
+     * Reavaliacao da tranca quando ela chega antes das outras condicoes.
+     *
+     * A tranca e um evento unico: se door_lock_status=1 chegar antes de engine_state
+     * virar desligado, a condicao falha e a funcionalidade nao acontece de novo naquele
+     * uso do carro. Em vez de assinar engine_state (que num hibrido muda toda hora, por
+     * start-stop), reavaliamos algumas vezes em intervalo curto.
+     */
+    private static final long LOCK_RECHECK_DELAY_MS = 3_000;
+    private static final int  LOCK_RECHECK_MAX      = 4;
 
     private static Method getServiceMethod;
 
@@ -133,6 +151,19 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
     /** null = ainda nao sabemos; evita tratar o primeiro valor como uma transicao. */
     private Boolean lastReady = null;
+    /**
+     * Ja agimos nesta trancada. A ROM repete door_lock_status=1, e sem isto cada
+     * repeticao mandaria fechar vidros e desligar radios de novo. Zera ao destrancar.
+     */
+    private boolean lockActionDone = false;
+    /**
+     * Nos desligamos os radios por causa da tranca. So enquanto isto for true a guarda
+     * reverte um religamento — assim ela nao briga com o usuario que destrancou e
+     * voltou, nem com o carro apenas desligado sem ninguem ter saido.
+     */
+    private boolean radiosOffByLock = false;
+    /** Reavaliacoes restantes da tranca; ver LOCK_RECHECK_DELAY_MS. */
+    private int lockRechecksLeft = 0;
 
     private BroadcastReceiver vehicleInitReceiver;
     private BroadcastReceiver radioGuardReceiver;
@@ -140,18 +171,18 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private final Runnable uiPushRunnable = this::pushUiState;
 
     /**
-     * Chaves que disparam acao. car.basic.vehicle_speed e car.basic.gear_status ficam
-     * DE FORA: eles existem apenas como guarda, lidos sob demanda em freshData().
+     * Chaves que disparam acao. vehicle_speed, gear_status e engine_state ficam DE
+     * FORA: existem apenas como guarda, lidos sob demanda em freshData().
      *
      * Isso e correcao de travamento, nao arrumacao. A velocidade muda varias vezes por
      * segundo andando, e antes cada mudanca virava um post na thread react MAIS um
-     * pushUiState — que faz duas chamadas de binder (estado do Bluetooth e da ancora)
-     * e um post para a main thread com recomposicao do Compose. Dava um punhado de
-     * ciclos desses por segundo, sem parar, inclusive com o app em background.
+     * pushUiState — que faz chamadas de binder para o estado dos radios e um post para
+     * a main thread com recomposicao do Compose. Dava um punhado de ciclos desses por
+     * segundo, sem parar, inclusive com o app em background.
      */
     private static boolean isActionableKey(String key) {
-        return CarProps.DRIVING_READY.equals(key)
-                || CarProps.MIRROR_FOLD.equals(key)
+        return CarProps.DOOR_LOCK.equals(key)
+                || CarProps.DRIVING_READY.equals(key)
                 || CarProps.DISTRACTION.equals(key);
     }
 
@@ -331,7 +362,9 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                                          ? "instalado" : "NAO INSTALADO"));
             PersistentLog.w(TAG, "conectado ao veiculo — ready="
                     + dataCache.get(CarProps.DRIVING_READY)
-                    + " mirror=" + dataCache.get(CarProps.MIRROR_FOLD)
+                    + " lock=" + dataCache.get(CarProps.DOOR_LOCK)
+                    + " engine=" + dataCache.get(CarProps.ENGINE_STATE)
+                    + " gear=" + dataCache.get(CarProps.GEAR_STATUS)
                     + " volume=" + dataCache.get(CarProps.MEDIA_VOLUME));
 
             mainHandler.post(() -> ComfortStateHolder.INSTANCE.updateConnected(true));
@@ -368,8 +401,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             restoreBluetoothIfPending();
             restoreWifiIfPending();
         } else {
-            // Central ligada com o carro desligado: garante os radios desligados.
-            applyPowerOff();
+            // Carro desligado no start NAO e mais motivo para desligar radio nenhum: o
+            // gatilho agora e a tranca, e a central passa minutos ligada com o carro
+            // desligado e o motorista ainda dentro. Aqui so liberamos o volume inicial
+            // para a proxima partida.
+            prefs.edit().putBoolean(Prefs.VOLUME_APPLIED_THIS_CYCLE, false).apply();
         }
     }
 
@@ -379,8 +415,8 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                 case CarProps.DRIVING_READY:
                     onDrivingReadyChanged(value);
                     break;
-                case CarProps.MIRROR_FOLD:
-                    if ("0".equals(value)) onMirrorFolded();
+                case CarProps.DOOR_LOCK:
+                    onDoorLockChanged(value);
                     break;
                 case CarProps.DISTRACTION:
                     if ("1".equals(value) && prefs.getBoolean(Prefs.KEEP_DISTRACTION_DISABLED,
@@ -404,6 +440,10 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
         if (isReady) {
             PersistentLog.w(TAG, "veiculo ligado (driving_ready=" + value + ")");
+            // Carro ligou: a guarda para de reverter religamentos e a proxima trancada
+            // volta a poder agir, mesmo que o destrancar nao tenha sido observado.
+            lockActionDone  = false;
+            radiosOffByLock = false;
             // ORDEM E LATENCIA: o volume e uma unica chamada de binder e resolve na
             // hora; Bluetooth e ancora precisam criar processos via Shizuku, o que
             // custa dezenas/centenas de ms. Volume primeiro, sempre.
@@ -422,32 +462,71 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         PersistentLog.w(TAG, "aviso de distracoes -> " + (enabled ? "ligado" : "desligado"));
     }
 
-    /** Vidros ao rebater os retrovisores — funcionalidade 1. */
-    private void onMirrorFolded() {
-        if (!prefs.getBoolean(Prefs.CLOSE_WINDOWS_ON_FOLD_MIRROR,
-                Prefs.DEF_CLOSE_WINDOWS_ON_FOLD_MIRROR)) return;
-
-        // Os retrovisores tambem recolhem em movimento em algumas configuracoes; sem
-        // esta guarda o app subiria os vidros com o carro andando.
-        float speed = parseFloat(freshData(CarProps.VEHICLE_SPEED), 0f);
-        if (speed > 0) {
-            log("retrovisores rebatidos IGNORADOS: carro em movimento (" + speed + ")");
+    /**
+     * Gatilho unico das funcionalidades 1 e 2: o carro foi TRANCADO estando em P com o
+     * motor desligado — ou seja, o motorista saiu e foi embora.
+     *
+     * Por que trocamos os gatilhos anteriores: o rebatimento dos retrovisores acontece
+     * em outras situacoes (e nem sempre acontece), e a transicao de driving_ready
+     * dispara com o carro apenas desligado, sem ninguem ter ido embora — a central fica
+     * ligada minutos depois disso. "Trancou" e o unico evento que significa de fato
+     * "acabou o uso do carro".
+     */
+    private void onDoorLockChanged(String value) {
+        if (DOOR_UNLOCKED.equals(value)) {
+            // Destrancou: libera para agir na proxima trancada e para de reverter os
+            // radios, senao a guarda brigaria com o usuario que acabou de voltar.
+            if (lockActionDone || radiosOffByLock) log("carro destrancado");
+            lockActionDone   = false;
+            radiosOffByLock  = false;
+            lockRechecksLeft = 0;
             return;
         }
-        // A marcha so e criterio com o carro LIGADO. No caso normal — rebater ao
-        // travar e sair — o carro ja esta desligado e o gear_status devolve valor
-        // parado/indefinido; exigir P ali era o que fazia a funcionalidade falhar "em
-        // alguns casos". Carro desligado nao anda, e a guarda de velocidade acima ja
-        // cobre o risco.
-        if (!isCarOff()) {
-            String gear = freshData(CarProps.GEAR_STATUS);
-            if (!GEAR_PARK.equals(gear)) {
-                log("retrovisores rebatidos IGNORADOS: carro ligado fora de P (gear="
-                        + gear + ")");
-                return;
-            }
+        if (!DOOR_LOCKED.equals(value)) return;
+        lockRechecksLeft = LOCK_RECHECK_MAX;
+        evaluateLockTrigger();
+    }
+
+    /** Confere as tres condicoes e age; reagenda se a tranca chegou adiantada. */
+    private void evaluateLockTrigger() {
+        if (lockActionDone) return;
+        if (!DOOR_LOCKED.equals(freshData(CarProps.DOOR_LOCK))) {
+            lockRechecksLeft = 0;   // destrancou no meio das tentativas
+            return;
         }
-        if (closeAllWindows()) log("retrovisores rebatidos, vidros fechados");
+
+        float  speed  = parseFloat(freshData(CarProps.VEHICLE_SPEED), 0f);
+        String gear   = freshData(CarProps.GEAR_STATUS);
+        String engine = freshData(CarProps.ENGINE_STATE);
+        if (speed > 0 || !GEAR_PARK.equals(gear) || !isEngineOff(engine)) {
+            if (lockRechecksLeft-- > 0) {
+                Log.w(TAG, "trancado mas condicoes nao batem, reavaliando em "
+                        + LOCK_RECHECK_DELAY_MS + "ms (gear=" + gear + " engine=" + engine
+                        + " speed=" + speed + ")");
+                react.postDelayed(this::evaluateLockTrigger, LOCK_RECHECK_DELAY_MS);
+            } else {
+                log("trancado, mas as condicoes nao bateram — IGNORADO (gear=" + gear
+                        + " engine=" + engine + " speed=" + speed + ")");
+            }
+            return;
+        }
+
+        lockActionDone   = true;
+        lockRechecksLeft = 0;
+        log("carro trancado em P com motor desligado (engine=" + engine + ")");
+
+        if (prefs.getBoolean(Prefs.CLOSE_WINDOWS_ON_LOCK, Prefs.DEF_CLOSE_WINDOWS_ON_LOCK)) {
+            if (closeAllWindows()) log("vidros fechados");
+        }
+        applyRadiosOff();
+    }
+
+    private static boolean isEngineOff(String engineState) {
+        if (engineState == null) return false;
+        for (String off : ENGINE_OFF_VALUES) {
+            if (off.equals(engineState)) return true;
+        }
+        return false;
     }
 
     /** Volume inicial — funcionalidade 4. */
@@ -462,34 +541,46 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     /** Desligar Bluetooth e ancora com o carro — funcionalidade 2, metade do desligar. */
+    /**
+     * Carro desligado: agora isto NAO toca nos radios. Desligar o carro nao significa
+     * que o motorista foi embora — a central fica ligada minutos, e era ai que o
+     * Android Auto continuava conectado com alguem ainda dentro do carro. Quem desliga
+     * radio e a tranca, em applyRadiosOff().
+     */
     private void applyPowerOff() {
-        // Libera o volume inicial para a proxima partida ANTES dos radios: se algo
-        // abaixo estourar, o volume da proxima partida nao e a vitima.
         prefs.edit().putBoolean(Prefs.VOLUME_APPLIED_THIS_CYCLE, false).apply();
+        pushUiState();
+    }
 
-        if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_POWER_OFF, Prefs.DEF_DISABLE_BLUETOOTH)
+    /** Metade dos radios do gatilho de tranca — funcionalidade 2. */
+    private void applyRadiosOff() {
+        boolean acted = false;
+        if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
                 && isBluetoothOn()) {
             prefs.edit().putBoolean(Prefs.BT_RESTORE_PENDING, true).apply();
             setBluetoothEnabled(false);
-            log("carro desligado, Bluetooth desligado");
+            log("Bluetooth desligado");
+            acted = true;
         }
-        if (prefs.getBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF, Prefs.DEF_DISABLE_WIFI)) {
+        if (prefs.getBoolean(Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
             // Encerra a projecao ANTES de cortar o transporte, para a sessao terminar
             // limpa em vez de o telefone ficar tentando reconectar num AP que caiu.
             stopAndroidAuto();
             if (isWifiOn()) {
                 prefs.edit().putBoolean(Prefs.WIFI_RESTORE_PENDING, true).apply();
                 setWifiEnabled(false);
-                log("carro desligado, Wi-Fi da central desligado");
+                log("Wi-Fi da central desligado");
             } else {
-                log("carro desligado, Wi-Fi ja estava desligado");
+                log("Wi-Fi ja estava desligado");
             }
+            acted = true;
         }
+        if (acted) radiosOffByLock = true;
         pushUiState();
     }
 
     private void restoreBluetoothIfPending() {
-        if (!prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_POWER_OFF,
+        if (!prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK,
                 Prefs.DEF_DISABLE_BLUETOOTH)) return;
         if (!prefs.getBoolean(Prefs.BT_RESTORE_PENDING, false)) return;
         // O pendente e consumido mesmo se ja estiver ligado: sem isso um Bluetooth
@@ -502,7 +593,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     private void restoreWifiIfPending() {
-        if (!prefs.getBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF, Prefs.DEF_DISABLE_WIFI)) return;
+        if (!prefs.getBoolean(Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) return;
         if (!prefs.getBoolean(Prefs.WIFI_RESTORE_PENDING, false)) return;
         prefs.edit().putBoolean(Prefs.WIFI_RESTORE_PENDING, false).apply();
         if (isWifiOn()) return;
@@ -526,10 +617,10 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                             BluetoothAdapter.ERROR);
                     if (state != BluetoothAdapter.STATE_ON) return;
                     react.post(() -> {
-                        if (isCarOff() && prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_POWER_OFF,
-                                Prefs.DEF_DISABLE_BLUETOOTH)) {
+                        if (radiosOffByLock && prefs.getBoolean(
+                                Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)) {
                             setBluetoothEnabled(false);
-                            log("Bluetooth religou com o carro desligado, desligado de novo");
+                            log("Bluetooth religou com o carro trancado, desligado de novo");
                         }
                         pushUiState();
                     });
@@ -538,11 +629,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                             WifiManager.WIFI_STATE_UNKNOWN);
                     if (state != WifiManager.WIFI_STATE_ENABLED) return;
                     react.post(() -> {
-                        if (isCarOff() && prefs.getBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF,
-                                Prefs.DEF_DISABLE_WIFI)) {
+                        if (radiosOffByLock && prefs.getBoolean(
+                                Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
                             stopAndroidAuto();
                             setWifiEnabled(false);
-                            log("Wi-Fi religou com o carro desligado, desligado de novo");
+                            log("Wi-Fi religou com o carro trancado, desligado de novo");
                         }
                         pushUiState();
                     });
@@ -553,11 +644,6 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         ContextCompat.registerReceiver(this, radioGuardReceiver, filter,
                 ContextCompat.RECEIVER_EXPORTED);
-    }
-
-    /** So considera "desligado" o que sabemos ser desligado — na duvida, nao age. */
-    private boolean isCarOff() {
-        return lastReady != null && !lastReady;
     }
 
     private static boolean isReady(String drivingReady) {
@@ -767,14 +853,14 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private void pushUiState() {
         if (!ComfortStateHolder.INSTANCE.getUiVisible()) return;
         final String ready   = dataCache.get(CarProps.DRIVING_READY);
-        final String mirror  = dataCache.get(CarProps.MIRROR_FOLD);
+        final String lock    = dataCache.get(CarProps.DOOR_LOCK);
         final String volume  = dataCache.get(CarProps.MEDIA_VOLUME);
         final boolean bt      = isBluetoothOn();
         final boolean wifi    = isWifiOn();
         mainHandler.post(() -> {
             ComfortStateHolder holder = ComfortStateHolder.INSTANCE;
             holder.setVehicleValue(CarProps.DRIVING_READY, ready);
-            holder.setVehicleValue(CarProps.MIRROR_FOLD, mirror);
+            holder.setVehicleValue(CarProps.DOOR_LOCK, lock);
             holder.setVehicleValue(CarProps.MEDIA_VOLUME, volume);
             holder.setRadios(bt, wifi);
         });

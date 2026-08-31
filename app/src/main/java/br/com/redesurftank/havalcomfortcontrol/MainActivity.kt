@@ -107,15 +107,15 @@ private fun ComfortScreen() {
 
     var closeWindows by remember {
         mutableStateOf(prefs.getBoolean(
-            Prefs.CLOSE_WINDOWS_ON_FOLD_MIRROR, Prefs.DEF_CLOSE_WINDOWS_ON_FOLD_MIRROR))
+            Prefs.CLOSE_WINDOWS_ON_LOCK, Prefs.DEF_CLOSE_WINDOWS_ON_LOCK))
     }
     var disableBluetooth by remember {
         mutableStateOf(prefs.getBoolean(
-            Prefs.DISABLE_BLUETOOTH_ON_POWER_OFF, Prefs.DEF_DISABLE_BLUETOOTH))
+            Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH))
     }
     var disableWifi by remember {
         mutableStateOf(prefs.getBoolean(
-            Prefs.DISABLE_WIFI_ON_POWER_OFF, Prefs.DEF_DISABLE_WIFI))
+            Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI))
     }
     var keepDistractionOff by remember {
         mutableStateOf(prefs.getBoolean(
@@ -269,6 +269,8 @@ private fun ComfortScreen() {
             Spacer(Modifier.width(10.dp))
             StatusChip("Carro ligado", state.drivingReady?.let { it != "-1" && it != "0" } == true)
             Spacer(Modifier.width(10.dp))
+            StatusChip("Trancado", state.doorLock == "1")
+            Spacer(Modifier.width(10.dp))
             StatusChip("Bluetooth", state.bluetoothOn)
             Spacer(Modifier.width(10.dp))
             StatusChip("Wi-Fi", state.wifiOn)
@@ -319,37 +321,39 @@ private fun ComfortScreen() {
         ) {
             FeatureCard(
                 modifier = Modifier.weight(1f),
-                title = "Vidros ao rebater",
-                description = "Fecha todos os vidros quando os retrovisores são "
-                        + "rebatidos. Ignorado se o carro estiver em movimento ou "
-                        + "fora de P.",
+                title = "Vidros ao trancar",
+                description = "Fecha todos os vidros quando o carro é trancado, estando "
+                        + "em P com o motor desligado — ou seja, quando você saiu e foi "
+                        + "embora.",
                 checked = closeWindows,
                 onCheckedChange = {
                     closeWindows = it
-                    prefs.edit().putBoolean(Prefs.CLOSE_WINDOWS_ON_FOLD_MIRROR, it).apply()
+                    prefs.edit().putBoolean(Prefs.CLOSE_WINDOWS_ON_LOCK, it).apply()
                 },
-                footer = "retrovisores: " + when (state.mirrorFold) {
+                footer = "portas: " + when (state.doorLock) {
                     null -> "—"
-                    "0"  -> "rebatidos"
-                    else -> "abertos"
+                    "1"  -> "trancadas"
+                    "3"  -> "destrancadas"
+                    else -> state.doorLock!!
                 }
             )
             FeatureCard(
                 modifier = Modifier.weight(1f),
-                title = "Desconectar ao desligar",
-                description = "Ao desligar o carro, encerra o Android Auto e desliga "
-                        + "Bluetooth e Wi-Fi da central — a central fica ligada alguns "
-                        + "minutos e o telefone continuava conectado. Religa na partida.",
+                title = "Desconectar ao trancar",
+                description = "Ao trancar o carro, encerra o Android Auto e desliga "
+                        + "Bluetooth e Wi-Fi da central. O gatilho é a tranca, não o "
+                        + "desligar: a central fica ligada minutos com você ainda "
+                        + "dentro. Religa na partida.",
                 checked = disableBluetooth,
                 onCheckedChange = {
                     disableBluetooth = it
-                    prefs.edit().putBoolean(Prefs.DISABLE_BLUETOOTH_ON_POWER_OFF, it).apply()
+                    prefs.edit().putBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, it).apply()
                 },
                 checkedLabel = "Bluetooth",
                 secondChecked = disableWifi,
                 onSecondCheckedChange = {
                     disableWifi = it
-                    prefs.edit().putBoolean(Prefs.DISABLE_WIFI_ON_POWER_OFF, it).apply()
+                    prefs.edit().putBoolean(Prefs.DISABLE_WIFI_ON_LOCK, it).apply()
                 },
                 secondCheckedLabel = "Wi-Fi da central"
             )
