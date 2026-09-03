@@ -138,6 +138,27 @@ silêncio até o próximo boot.
 **Não reordenar métodos nos `.aidl`**: a ordem define os códigos de transação e tem
 que casar com o serviço do outro lado na ROM.
 
+## Atualização: instala pelo Shizuku, não pelo instalador do sistema
+
+`REQUEST_INSTALL_PACKAGES` no manifest **não basta** desde o Android 8: existe um
+appop por app ("Instalar apps desconhecidos") que o usuário precisa habilitar numa tela
+do Settings — e esta central **não expõe essa tela**. O fluxo padrão
+(FileProvider + `ACTION_VIEW`) morria num aviso sem saída.
+
+`utils/ApkInstaller.kt` usa o Shizuku, que já é pré-requisito do app: copia o APK para
+`/data/local/tmp` (o diretório externo do app fica sob `Android/data/<pkg>`, e a leitura
+dele pelo uid de shell varia com o sdcardfs da ROM) e roda `pm install -r -d`. Com uid
+de shell não há appop a pedir.
+
+O `-d` aceita downgrade de `versionCode`, para voltar atrás numa release ruim sem
+desinstalar. E o sucesso é decidido pelo **texto** da saída, não pelo exit code: o
+`pm install` do Android 9 devolve 0 em alguns erros e escreve `Failure [MOTIVO]` na
+saída.
+
+O instalador do sistema ficou como fallback num diálogo que agora tem ação de verdade
+— "Instalador do sistema" e "Permissões" (com `runCatching`, porque
+`ACTION_MANAGE_UNKNOWN_APP_SOURCES` pode não existir na ROM).
+
 ## Diagnóstico de campo
 
 Botão **Log** no cabeçalho abre o log persistente e oferece duas saídas:

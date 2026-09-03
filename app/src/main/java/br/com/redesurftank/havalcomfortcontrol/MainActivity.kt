@@ -2,6 +2,8 @@ package br.com.redesurftank.havalcomfortcontrol
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -59,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import br.com.redesurftank.havalcomfortcontrol.services.ComfortControlService
 import br.com.redesurftank.havalcomfortcontrol.ui.theme.HavalComfortControlTheme
+import br.com.redesurftank.havalcomfortcontrol.utils.ApkInstaller
 import br.com.redesurftank.havalcomfortcontrol.utils.LogUploader
 import br.com.redesurftank.havalcomfortcontrol.utils.PersistentLog
 import kotlinx.coroutines.Dispatchers
@@ -145,6 +148,8 @@ private fun ComfortScreen() {
     var showMsgDialog    by remember { mutableStateOf(false) }
     var showPermDialog   by remember { mutableStateOf(false) }
     var downloadJob      by remember { mutableStateOf<Job?>(null) }
+    var pendingApk       by remember { mutableStateOf<File?>(null) }
+    var installError     by remember { mutableStateOf("") }
 
     // Diagnóstico: o log persistente é a única evidência que sobrevive a um restart do
     // serviço, e sem uma forma de lê-lo na central o diagnóstico de campo é às cegas.
@@ -190,16 +195,39 @@ private fun ComfortScreen() {
         }
     }
 
-    fun installApk(file: File) {
-        if (!context.packageManager.canRequestPackageInstalls()) {
-            showPermDialog = true
-            return
-        }
+    /** Abre o instalador do sistema. Só usado se o Shizuku não der conta. */
+    fun installViaSystem(file: File) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
         context.startActivity(Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         })
+    }
+
+    /**
+     * Instala pelo Shizuku primeiro.
+     *
+     * O caminho normal (FileProvider + ACTION_VIEW) exige o appop
+     * "Instalar apps desconhecidos", que só se habilita numa tela do Settings que esta
+     * central não expõe — era ali que a atualização morria, num aviso sem botão. Com
+     * uid de shell o `pm install` não pede appop nenhum.
+     */
+    fun installApk(file: File) {
+        pendingApk = file
+        scope.launch(Dispatchers.IO) {
+            val erro = ApkInstaller.install(file)
+            withContext(Dispatchers.Main) {
+                if (erro == null) {
+                    dialogMessage = "Atualização instalada. O app vai reiniciar."
+                    showMsgDialog = true
+                } else {
+                    // Fallback: pede o caminho do sistema, que pode funcionar em outra
+                    // central. O diálogo agora tem ação, não só um OK.
+                    installError  = erro
+                    showPermDialog = true
+                }
+            }
+        }
     }
 
     fun startDownload() {
@@ -548,13 +576,39 @@ private fun ComfortScreen() {
     if (showPermDialog) {
         AlertDialog(
             onDismissRequest = { showPermDialog = false },
-            title = { Text("Permissão necessária") },
+            title = { Text("Instalação pelo Shizuku falhou") },
             text = {
-                Text("Autorize a instalação de apps desta fonte para aplicar a "
-                        + "atualização, depois toque em Atualizar novamente.")
+                Column {
+                    Text(installError, fontSize = 14.sp, color = HmiFgMuted)
+                    Spacer(Modifier.height(10.dp))
+                    Text("Tente pelo instalador do sistema. Se ele reclamar de "
+                            + "permissão, abra as configurações de origens "
+                            + "desconhecidas para este app.", fontSize = 14.sp)
+                }
             },
             confirmButton = {
-                TextButton(onClick = { showPermDialog = false }) { Text("OK") }
+                Row {
+                    TextButton(onClick = {
+                        showPermDialog = false
+                        pendingApk?.let { installViaSystem(it) }
+                    }) { Text("Instalador do sistema") }
+                    TextButton(onClick = {
+                        showPermDialog = false
+                        // Pode não existir nesta ROM — daí o runCatching em vez de
+                        // deixar a Activity morrer com ActivityNotFoundException.
+                        runCatching {
+                            context.startActivity(Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:${context.packageName}")
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }.onFailure {
+                            dialogMessage = "Esta central não tem a tela de permissão " +
+                                    "de instalação (${it.javaClass.simpleName})."
+                            showMsgDialog = true
+                        }
+                    }) { Text("Permissões") }
+                    TextButton(onClick = { showPermDialog = false }) { Text("Fechar") }
+                }
             }
         )
     }

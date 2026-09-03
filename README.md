@@ -30,7 +30,8 @@ Termux/SSH, bootstrap do Shizuku, ~100 MB de recursos).
 Cada item tem seu interruptor na tela — todos vêm ligados.
 
 Botão **Atualizar** no cabeçalho: consulta a Release mais recente no GitHub, baixa o
-APK e abre o instalador.
+APK e instala pelo Shizuku — sem passar pelo instalador do sistema, que nesta central
+exige uma permissão cuja tela não é alcançável.
 
 Botão **Log**: mostra o log de diagnóstico na tela, com **Enviar** (sobe para o
 Firebase e devolve uma URL) e **Salvar** (grava em `Android/data/<pkg>/files/diag.log`).
