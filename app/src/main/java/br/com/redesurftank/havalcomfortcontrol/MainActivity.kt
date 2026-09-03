@@ -110,6 +110,10 @@ private fun ComfortScreen() {
         mutableStateOf(prefs.getBoolean(
             Prefs.CLOSE_WINDOWS_ON_LOCK, Prefs.DEF_CLOSE_WINDOWS_ON_LOCK))
     }
+    var stopAndroidAuto by remember {
+        mutableStateOf(prefs.getBoolean(
+            Prefs.STOP_ANDROID_AUTO_ON_LOCK, Prefs.DEF_STOP_ANDROID_AUTO))
+    }
     var disableBluetooth by remember {
         mutableStateOf(prefs.getBoolean(
             Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH))
@@ -350,11 +354,10 @@ private fun ComfortScreen() {
                 description = "Fecha todos os vidros quando o carro é trancado, estando "
                         + "em P com o motor desligado — ou seja, quando você saiu e foi "
                         + "embora.",
-                checked = closeWindows,
-                onCheckedChange = {
+                toggles = listOf(Toggle("Ativado", closeWindows) {
                     closeWindows = it
                     prefs.edit().putBoolean(Prefs.CLOSE_WINDOWS_ON_LOCK, it).apply()
-                },
+                }),
                 footer = "portas: " + when (state.doorLock) {
                     null -> "—"
                     "1"  -> "trancadas"
@@ -365,45 +368,44 @@ private fun ComfortScreen() {
             FeatureCard(
                 modifier = Modifier.weight(1f),
                 title = "Desconectar ao trancar",
-                description = "Ao trancar o carro, encerra o Android Auto e desliga "
-                        + "Bluetooth e Wi-Fi da central. O gatilho é a tranca, não o "
-                        + "desligar: a central fica ligada minutos com você ainda "
-                        + "dentro. Religa na partida.",
-                checked = disableBluetooth,
-                onCheckedChange = {
-                    disableBluetooth = it
-                    prefs.edit().putBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, it).apply()
-                },
-                checkedLabel = "Bluetooth",
-                secondChecked = disableWifi,
-                onSecondCheckedChange = {
-                    disableWifi = it
-                    prefs.edit().putBoolean(Prefs.DISABLE_WIFI_ON_LOCK, it).apply()
-                },
-                secondCheckedLabel = "Wi-Fi da central"
+                description = "Ao trancar o carro, encerra o receiver do Android Auto "
+                        + "na central — isso derruba a sessão e o Wi-Fi do AA sem fio "
+                        + "junto, sem mexer nos rádios. Desligar Bluetooth e Wi-Fi é "
+                        + "último recurso, só se a sessão insistir.",
+                toggles = listOf(
+                    Toggle("Encerrar Android Auto", stopAndroidAuto) {
+                        stopAndroidAuto = it
+                        prefs.edit().putBoolean(Prefs.STOP_ANDROID_AUTO_ON_LOCK, it).apply()
+                    },
+                    Toggle("Bluetooth (invasivo)", disableBluetooth) {
+                        disableBluetooth = it
+                        prefs.edit().putBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, it).apply()
+                    },
+                    Toggle("Wi-Fi da central (invasivo)", disableWifi) {
+                        disableWifi = it
+                        prefs.edit().putBoolean(Prefs.DISABLE_WIFI_ON_LOCK, it).apply()
+                    },
+                )
             )
             FeatureCard(
                 modifier = Modifier.weight(1f),
                 title = "Aviso de distrações",
                 description = "Mantém o aviso de distrações desligado — se a central "
                         + "religar sozinha, o app desliga de novo.",
-                checked = keepDistractionOff,
-                onCheckedChange = {
+                toggles = listOf(Toggle("Manter desligado", keepDistractionOff) {
                     keepDistractionOff = it
                     prefs.edit().putBoolean(Prefs.KEEP_DISTRACTION_DISABLED, it).apply()
-                },
-                checkedLabel = "Manter desligado"
+                })
             )
             FeatureCard(
                 modifier = Modifier.weight(1f),
                 title = "Volume inicial",
                 description = "Define o volume da multimídia a cada partida. "
                         + "Aplicado uma vez por ciclo de ignição.",
-                checked = setStartupVolume,
-                onCheckedChange = {
+                toggles = listOf(Toggle("Ativado", setStartupVolume) {
                     setStartupVolume = it
                     prefs.edit().putBoolean(Prefs.SET_STARTUP_VOLUME, it).apply()
-                },
+                }),
                 footer = "volume atual no carro: ${state.mediaVolume ?: "—"}"
             ) {
                 Text("Volume: $startupVolume", fontSize = 17.sp,
@@ -600,16 +602,11 @@ private fun FeatureCard(
     modifier: Modifier = Modifier,
     title: String,
     description: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    checkedLabel: String = "Ativado",
-    secondChecked: Boolean? = null,
-    onSecondCheckedChange: ((Boolean) -> Unit)? = null,
-    secondCheckedLabel: String = "",
+    toggles: List<Toggle>,
     footer: String? = null,
     extra: (@Composable () -> Unit)? = null,
 ) {
-    val active = checked || (secondChecked == true)
+    val active = toggles.any { it.checked }
     Column(
         modifier = modifier
             .fillMaxHeight()
@@ -628,10 +625,9 @@ private fun FeatureCard(
             Spacer(Modifier.height(8.dp))
         }
 
-        ToggleRow(checkedLabel, checked, onCheckedChange)
-        if (secondChecked != null && onSecondCheckedChange != null) {
-            Spacer(Modifier.height(4.dp))
-            ToggleRow(secondCheckedLabel, secondChecked, onSecondCheckedChange)
+        toggles.forEachIndexed { i, t ->
+            if (i > 0) Spacer(Modifier.height(4.dp))
+            ToggleRow(t.label, t.checked, t.onChange)
         }
 
         if (footer != null) {
@@ -640,6 +636,14 @@ private fun FeatureCard(
         }
     }
 }
+
+/** Um interruptor do cartão. Lista em vez de pares fixos porque "Desconectar ao
+ *  trancar" tem três: encerrar o Android Auto, Bluetooth e Wi-Fi. */
+private data class Toggle(
+    val label: String,
+    val checked: Boolean,
+    val onChange: (Boolean) -> Unit,
+)
 
 @Composable
 private fun ToggleRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {

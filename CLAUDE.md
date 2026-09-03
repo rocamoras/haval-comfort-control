@@ -92,16 +92,37 @@ O objetivo real dessa funcionalidade é derrubar a sessão do **Android Auto sem
 quando o motorista sai e tranca o carro — a central fica ligada alguns minutos depois
 disso e o telefone continuava conectado.
 
-O link do AAW **não passa pelo tethering do Android**: é um AP próprio da central
-(LocalOnlyHotspot / softAP do serviço de projeção). Por isso
-`IConnectivityManager.stopTethering`, que é o que o app-tool usa, não resolve — ele
-desliga outro AP. Os `.aidl` de `IConnectivityManager`/`ResultReceiver` foram removidos
-do projeto por isso.
+### O receiver é `com.ts.androidauto.app` — não o gearhead
 
-O caminho atual é: `am force-stop com.google.android.projection.gearhead`, depois
-`svc wifi disable`, religando na partida. O Wi-Fi da central **inteiro** cai — decisão
-do usuário, ciente de que a central fica sem Wi-Fi enquanto o carro está trancado. O estado do Wi-Fi tem API pública
-(`WifiManager.isWifiEnabled()`), sem reflexão em `@hide`.
+`com.google.android.projection.gearhead` é o app do **celular**. Ele não está instalado
+na central, e o `am force-stop` nele (v1.2.0–v1.4.0) falhava em silêncio — quem
+derrubava a sessão era, na prática, só o `svc wifi disable`.
+
+O receiver real do head unit está medido no carro:
+`com.ts.androidauto.app/.display.AapActivity`, app de sistema VENDOR, Android 9. Ver a
+memória `central-haval-fatos` e o `WindowModeUtils.kt` do haval-engine-reverse.
+
+### Por que matar o receiver basta
+
+O AP do AAW é um **`LocalOnlyHotspot`**, e o framework amarra o tempo de vida dele ao
+app que o requisitou. Encerrando o receiver, **o Android derruba o AP sozinho** — sem
+tocar no Wi-Fi cliente da central nem no Bluetooth. Daí a ordem por invasividade:
+
+| Ação | Default | Efeito colateral |
+|---|---|---|
+| `am force-stop com.ts.androidauto.app` | **on** | nenhum |
+| `svc bluetooth disable` | off | perde viva-voz |
+| `svc wifi disable` | off | perde internet da central |
+
+Os dois últimos ficaram como último recurso, para o caso de o receiver reiniciar
+sozinho. Eram default `true` só enquanto o alvo do force-stop estava errado.
+
+O `stopAndroidAuto()` **confere com `pidof`** depois do force-stop: recusar matar app de
+sistema não necessariamente devolve exit != 0 no `am`.
+
+`IConnectivityManager.stopTethering` (o que o app-tool usa) não serve para nada aqui —
+desliga o AP do tethering, que é outro. Os `.aidl` de
+`IConnectivityManager`/`ResultReceiver` foram removidos do projeto por isso.
 
 A ROM **não tem** nenhuma propriedade sobre projeção/Android Auto — varri as 800+
 chaves do `CarConstants` do app-tool. `sys.network.hotspot_state` e

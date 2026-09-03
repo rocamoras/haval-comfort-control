@@ -10,17 +10,17 @@ Termux/SSH, bootstrap do Shizuku, ~100 MB de recursos).
 
 1. **Vidros ao trancar** — fecha todos os vidros quando o carro é trancado, estando em
    P com o motor desligado.
-2. **Desconectar ao trancar** — no mesmo gatilho, encerra o Android Auto e desliga
-   Bluetooth e Wi-Fi da central, religando na partida o que estava ligado. Se a ROM
-   religar um deles enquanto o carro segue trancado, o app desliga de novo.
+2. **Desconectar ao trancar** — ao trancar, encerra o receiver do Android Auto na
+   central (`com.ts.androidauto.app`). Isso derruba a sessão e, com ela, o
+   `LocalOnlyHotspot` que o AA sem fio usava — o framework cuida disso — **sem mexer
+   nos rádios**: a central mantém Wi-Fi, internet e Bluetooth.
 
    O gatilho é a **tranca**, não o desligar: a central fica ligada alguns minutos depois
-   de o carro desligar, e nesse tempo o Android Auto sem fio continuava conectado com o
+   de o carro desligar, e nesse tempo o Android Auto continuava conectado com o
    motorista ainda dentro.
 
-   O Wi-Fi da central inteiro é desligado de propósito: o link do Android Auto sem fio
-   é um AP próprio da central, fora do caminho do tethering — `stopTethering` não o
-   alcança. Enquanto o carro estiver trancado, a central fica sem Wi-Fi.
+   Desligar Bluetooth e Wi-Fi da central existe como **último recurso**, desligado por
+   padrão, para o caso de a sessão insistir em voltar.
 3. **Aviso de distrações** — mantém o aviso desligado, reagindo se a central o
    reativar sozinha.
 4. **Volume inicial** — define o volume da multimídia a cada partida (default `10`,

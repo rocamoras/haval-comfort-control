@@ -69,8 +69,23 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private static final long SHIZUKU_BINDER_TIMEOUT_MS = 30_000;
     /** Coalesce de bursts de onDataChanged para o push de estado — so afeta a UI. */
     private static final long UI_PUSH_DEBOUNCE_MS = 120;
-    /** App de projecao do Android Auto sem fio, encerrado ao desligar o carro. */
-    private static final String ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead";
+    /**
+     * Receiver de Android Auto DA CENTRAL — o app que roda no head unit e termina a
+     * sessao quando morre.
+     *
+     * Medido no carro (memoria do projeto, 2026-09-01):
+     * com.ts.androidauto.app/.display.AapActivity, app de sistema VENDOR, Android 9.
+     *
+     * NAO confundir com com.google.android.projection.gearhead, que e o app do
+     * CELULAR: era esse que estava aqui antes, nao existe na central, e por isso o
+     * force-stop falhava em silencio — quem derrubava a sessao acabava sendo o
+     * `svc wifi disable`.
+     */
+    private static final String ANDROID_AUTO_PACKAGE = "com.ts.androidauto.app";
+    /** Pistas para descobrir no log um receiver diferente deste, se houver. */
+    private static final String[] PROJECTION_HINTS = {
+            "androidauto", "gearhead", "carlife", "carplay", "hicar", "zlink", "easyconn"
+    };
     /** Codigo do IVehicle no IBinderPool do VoiceAdapterService nesta ROM. */
     private static final int BINDER_POOL_VEHICLE = 6;
     /** IVehicle.setWindowStatus: 1 = vidro fechado. */
@@ -358,8 +373,9 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             Shizuku.addBinderDeadListener(this);
             PersistentLog.w(TAG, "SDK_INT=" + android.os.Build.VERSION.SDK_INT
                     + " wifi=" + (isWifiOn() ? "on" : "off")
-                    + " androidAuto=" + (isPackageInstalled(ANDROID_AUTO_PACKAGE)
-                                         ? "instalado" : "NAO INSTALADO"));
+                    + " receiverAA=" + (isPackageInstalled(ANDROID_AUTO_PACKAGE)
+                                        ? "instalado" : "NAO INSTALADO"));
+            react.post(this::logProjectionPackages);
             PersistentLog.w(TAG, "conectado ao veiculo — ready="
                     + dataCache.get(CarProps.DRIVING_READY)
                     + " lock=" + dataCache.get(CarProps.DOOR_LOCK)
@@ -552,9 +568,18 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         pushUiState();
     }
 
-    /** Metade dos radios do gatilho de tranca — funcionalidade 2. */
+    /**
+     * Metade "desconectar" do gatilho de tranca — funcionalidade 2.
+     *
+     * Ordem por invasividade: encerrar o receiver resolve sem efeito colateral, e
+     * desligar radio e ultimo recurso (default OFF).
+     */
     private void applyRadiosOff() {
         boolean acted = false;
+        if (prefs.getBoolean(Prefs.STOP_ANDROID_AUTO_ON_LOCK, Prefs.DEF_STOP_ANDROID_AUTO)) {
+            if (stopAndroidAuto()) log("Android Auto encerrado");
+            else log("Android Auto NAO encerrou — ligue Bluetooth/Wi-Fi como recurso extra");
+        }
         if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
                 && isBluetoothOn()) {
             prefs.edit().putBoolean(Prefs.BT_RESTORE_PENDING, true).apply();
@@ -563,9 +588,6 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             acted = true;
         }
         if (prefs.getBoolean(Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
-            // Encerra a projecao ANTES de cortar o transporte, para a sessao terminar
-            // limpa em vez de o telefone ficar tentando reconectar num AP que caiu.
-            stopAndroidAuto();
             if (isWifiOn()) {
                 prefs.edit().putBoolean(Prefs.WIFI_RESTORE_PENDING, true).apply();
                 setWifiEnabled(false);
@@ -631,7 +653,6 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                     react.post(() -> {
                         if (radiosOffByLock && prefs.getBoolean(
                                 Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
-                            stopAndroidAuto();
                             setWifiEnabled(false);
                             log("Wi-Fi religou com o carro trancado, desligado de novo");
                         }
@@ -796,18 +817,47 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     /**
-     * Encerra o app de projecao antes de tirar o Wi-Fi debaixo dele.
+     * Encerra o receiver de Android Auto da central. Acao PRINCIPAL da funcionalidade 2.
      *
-     * Sem isso o telefone perde o transporte com a sessao ativa e fica tentando
-     * reconectar; com o force-stop a sessao termina de forma limpa. O pacote e o
-     * Android Auto do Google, confirmado pelo usuario — se nao estiver instalado, o
-     * am reclama e o log registra, sem afetar o resto.
+     * Matar o receiver basta porque o AP do Android Auto sem fio e um
+     * LocalOnlyHotspot: o framework amarra o tempo de vida dele ao app que o pediu,
+     * entao o AP cai junto, sozinho. Nada de radio precisa ser desligado — nem o Wi-Fi
+     * cliente da central, nem o Bluetooth.
      */
-    private void stopAndroidAuto() {
+    private boolean stopAndroidAuto() {
         ShizukuUtils.ShellResult r = ShizukuUtils.run(
                 new String[]{"am", "force-stop", ANDROID_AUTO_PACKAGE});
         PersistentLog.w(TAG, "am force-stop " + ANDROID_AUTO_PACKAGE + " -> "
                 + r.describeFailure());
+        // Conferencia: force-stop de app de sistema pode ser recusado, e o `am` nem
+        // sempre devolve exit diferente de zero quando isso acontece.
+        ShizukuUtils.ShellResult pid = ShizukuUtils.run(
+                new String[]{"pidof", ANDROID_AUTO_PACKAGE});
+        boolean morto = pid.stdout.trim().isEmpty();
+        PersistentLog.w(TAG, "receiver do AA depois do force-stop: "
+                + (morto ? "encerrado" : "AINDA VIVO (pid " + pid.stdout.trim() + ")"));
+        return morto;
+    }
+
+    /** Uma vez no arranque: registra qual receiver de projecao existe nesta central. */
+    private void logProjectionPackages() {
+        ShizukuUtils.ShellResult r = ShizukuUtils.run(
+                new String[]{"pm", "list", "packages"});
+        if (!r.ran()) return;
+        StringBuilder achados = new StringBuilder();
+        for (String line : r.stdout.split("\n")) {
+            String pkg = line.trim().replace("package:", "");
+            String lower = pkg.toLowerCase();
+            for (String hint : PROJECTION_HINTS) {
+                if (lower.contains(hint)) {
+                    achados.append(pkg).append(' ');
+                    break;
+                }
+            }
+        }
+        PersistentLog.w(TAG, "pacotes de projecao instalados: "
+                + (achados.length() == 0 ? "(nenhum)" : achados.toString().trim())
+                + " | alvo=" + ANDROID_AUTO_PACKAGE);
     }
 
     private void updateData(String key, String value) {

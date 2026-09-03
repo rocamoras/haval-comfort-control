@@ -27,6 +27,13 @@ public final class Prefs {
      * Chaves novas de propósito: as antigas controlavam gatilhos diferentes.
      */
     public static final String CLOSE_WINDOWS_ON_LOCK = "close_windows_on_lock";
+    /**
+     * Encerra o receiver de Android Auto da central ao trancar. Acao PRINCIPAL da
+     * funcionalidade 2 — matar o receiver derruba a sessao e, com ela, o
+     * LocalOnlyHotspot que o AAW usava, sem tocar em radio nenhum.
+     */
+    public static final String STOP_ANDROID_AUTO_ON_LOCK = "stop_android_auto_on_lock";
+    /** Ultimo recurso: desligar o radio inteiro. Default OFF — ver DEF_DISABLE_*. */
     public static final String DISABLE_BLUETOOTH_ON_LOCK = "disable_bluetooth_on_lock";
     /**
      * Desliga o Wi-Fi DA CENTRAL ao desligar o carro. O nome antigo era
@@ -54,8 +61,19 @@ public final class Prefs {
 
     // ── Defaults ──────────────────────────────────────────────────────
     public static final boolean DEF_CLOSE_WINDOWS_ON_LOCK        = true;
-    public static final boolean DEF_DISABLE_BLUETOOTH            = true;
-    public static final boolean DEF_DISABLE_WIFI                 = true;
+    public static final boolean DEF_STOP_ANDROID_AUTO            = true;
+    /**
+     * Desligar os radios vem DESLIGADO por padrao.
+     *
+     * Era true enquanto o alvo do force-stop estava errado (usava o pacote do
+     * CELULAR, com.google.android.projection.gearhead, que nao existe na central) e
+     * portanto quem derrubava a sessao era o `svc wifi disable`. Com o receiver certo
+     * — com.ts.androidauto.app — matar o app basta, e desligar Wi-Fi/Bluetooth da
+     * central passa a ser custo sem beneficio: a central perde internet e viva-voz
+     * enquanto o carro esta trancado.
+     */
+    public static final boolean DEF_DISABLE_BLUETOOTH            = false;
+    public static final boolean DEF_DISABLE_WIFI                 = false;
     public static final boolean DEF_KEEP_DISTRACTION_DISABLED    = true;
     public static final boolean DEF_SET_STARTUP_VOLUME           = true;
     public static final int     DEF_STARTUP_VOLUME               = 10;
