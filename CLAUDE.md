@@ -102,15 +102,33 @@ O receiver real do head unit está medido no carro:
 `com.ts.androidauto.app/.display.AapActivity`, app de sistema VENDOR, Android 9. Ver a
 memória `central-haval-fatos` e o `WindowModeUtils.kt` do haval-engine-reverse.
 
-### Por que matar o receiver basta
+### O `.app` não basta — quem sustenta a sessão é o `projectionservice`
 
-O AP do AAW é um **`LocalOnlyHotspot`**, e o framework amarra o tempo de vida dele ao
-app que o requisitou. Encerrando o receiver, **o Android derruba o AP sozinho** — sem
-tocar no Wi-Fi cliente da central nem no Bluetooth. Daí a ordem por invasividade:
+Medido em campo (log de 2026-09-04): `am force-stop com.ts.androidauto.app` voltou
+`ok`, o `pidof` confirmou o processo morto, **e o telefone continuou conectado**. O
+`.app` é só a parte de tela (`.display.AapActivity`).
+
+A lista de pacotes do mesmo log revelou a resposta — a ROM tem oito pacotes de
+projeção, entre eles:
+
+```
+com.ts.androidauto.projectionservice
+com.autolink.androidauto.projectionservice
+```
+
+É o `projectionservice` que sustenta a sessão AAP e o AP do Wi-Fi. Desde a v1.6.0 o app
+encerra as duas famílias (`ts` e `autolink` — não se sabe qual está ativa, e a inativa
+não tem processo, então é barato). CarPlay fica de fora: não serve um telefone Android.
+
+**O `pidof` agora é lido ANTES também.** Sem o valor anterior, "processo morto" não
+distingue "matamos" de "nunca estava rodando" — foi essa ambiguidade que fez o log
+dizer `encerrado` enquanto a sessão seguia viva em outro processo.
+
+Ordem por invasividade:
 
 | Ação | Default | Efeito colateral |
 |---|---|---|
-| `am force-stop com.ts.androidauto.app` | **on** | nenhum |
+| `am force-stop` nos 4 pacotes de AA | **on** | nenhum |
 | `svc bluetooth disable` | off | perde viva-voz |
 | `svc wifi disable` | off | perde internet da central |
 

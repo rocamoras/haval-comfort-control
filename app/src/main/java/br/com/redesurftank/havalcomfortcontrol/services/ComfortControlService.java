@@ -82,7 +82,25 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * `svc wifi disable`.
      */
     private static final String ANDROID_AUTO_PACKAGE = "com.ts.androidauto.app";
-    /** Pistas para descobrir no log um receiver diferente deste, se houver. */
+    /**
+     * Todos os pacotes de Android Auto da central, na ordem em que sao encerrados.
+     *
+     * O `.app` sozinho NAO bastou: no teste de 04/09 o force-stop nele voltou ok, o
+     * pidof confirmou o processo morto, e o telefone continuou conectado. O `.app` e a
+     * parte de tela (.display.AapActivity) — quem sustenta a sessao AAP e o AP do
+     * Wi-Fi e o `projectionservice`, que a lista de pacotes daquele mesmo log revelou.
+     *
+     * Duas familias convivem na ROM, `ts` e `autolink`, e nao se sabe qual esta ativa;
+     * encerrar as duas e barato porque a inativa nao tem processo rodando. CarPlay fica
+     * de fora: nao tem como estar servindo um telefone Android.
+     */
+    private static final String[] ANDROID_AUTO_PACKAGES = {
+            "com.ts.androidauto.projectionservice",
+            "com.ts.androidauto.app",
+            "com.autolink.androidauto.projectionservice",
+            "com.autolink.androidauto.app",
+    };
+    /** Pistas para descobrir no log um receiver diferente destes, se houver. */
     private static final String[] PROJECTION_HINTS = {
             "androidauto", "gearhead", "carlife", "carplay", "hicar", "zlink", "easyconn"
     };
@@ -375,6 +393,17 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                     + " wifi=" + (isWifiOn() ? "on" : "off")
                     + " receiverAA=" + (isPackageInstalled(ANDROID_AUTO_PACKAGE)
                                         ? "instalado" : "NAO INSTALADO"));
+            // Quem esta VIVO agora, entre os pacotes de AA — a resposta que faltava
+            // para saber quem sustenta a sessao.
+            react.post(() -> {
+                StringBuilder vivos = new StringBuilder();
+                for (String pkg : ANDROID_AUTO_PACKAGES) {
+                    String pid = pidof(pkg);
+                    if (!pid.isEmpty()) vivos.append(pkg).append('(').append(pid).append(") ");
+                }
+                PersistentLog.w(TAG, "processos de AA vivos no arranque: "
+                        + (vivos.length() == 0 ? "(nenhum)" : vivos.toString().trim()));
+            });
             react.post(this::logProjectionPackages);
             PersistentLog.w(TAG, "conectado ao veiculo — ready="
                     + dataCache.get(CarProps.DRIVING_READY)
@@ -578,7 +607,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         boolean acted = false;
         if (prefs.getBoolean(Prefs.STOP_ANDROID_AUTO_ON_LOCK, Prefs.DEF_STOP_ANDROID_AUTO)) {
             if (stopAndroidAuto()) log("Android Auto encerrado");
-            else log("Android Auto NAO encerrou — ligue Bluetooth/Wi-Fi como recurso extra");
+            else log("nenhum processo de Android Auto estava rodando para encerrar");
         }
         if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
                 && isBluetoothOn()) {
@@ -825,18 +854,30 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * cliente da central, nem o Bluetooth.
      */
     private boolean stopAndroidAuto() {
-        ShizukuUtils.ShellResult r = ShizukuUtils.run(
-                new String[]{"am", "force-stop", ANDROID_AUTO_PACKAGE});
-        PersistentLog.w(TAG, "am force-stop " + ANDROID_AUTO_PACKAGE + " -> "
-                + r.describeFailure());
-        // Conferencia: force-stop de app de sistema pode ser recusado, e o `am` nem
-        // sempre devolve exit diferente de zero quando isso acontece.
-        ShizukuUtils.ShellResult pid = ShizukuUtils.run(
-                new String[]{"pidof", ANDROID_AUTO_PACKAGE});
-        boolean morto = pid.stdout.trim().isEmpty();
-        PersistentLog.w(TAG, "receiver do AA depois do force-stop: "
-                + (morto ? "encerrado" : "AINDA VIVO (pid " + pid.stdout.trim() + ")"));
-        return morto;
+        boolean matouAlgum = false;
+        for (String pkg : ANDROID_AUTO_PACKAGES) {
+            // O pid ANTES importa: sem ele, "processo morto" nao distingue "matamos"
+            // de "nunca estava rodando" — foi a ambiguidade que fez o log de 04/09
+            // dizer "encerrado" enquanto a sessao seguia viva no projectionservice.
+            String antes = pidof(pkg);
+            if (antes.isEmpty()) {
+                PersistentLog.w(TAG, "AA " + pkg + ": nao estava rodando");
+                continue;
+            }
+            ShizukuUtils.ShellResult r = ShizukuUtils.run(
+                    new String[]{"am", "force-stop", pkg});
+            String depois = pidof(pkg);
+            boolean morreu = depois.isEmpty();
+            PersistentLog.w(TAG, "AA " + pkg + ": pid " + antes
+                    + (morreu ? " -> encerrado" : " -> AINDA VIVO (" + depois + ")")
+                    + " | am: " + r.describeFailure());
+            if (morreu) matouAlgum = true;
+        }
+        return matouAlgum;
+    }
+
+    private String pidof(String pkg) {
+        return ShizukuUtils.run(new String[]{"pidof", pkg}).stdout.trim();
     }
 
     /** Uma vez no arranque: registra qual receiver de projecao existe nesta central. */
