@@ -83,16 +83,24 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      */
     private static final String ANDROID_AUTO_PACKAGE = "com.ts.androidauto.app";
     /**
-     * Todos os pacotes de Android Auto da central, na ordem em que sao encerrados.
+     * Pacotes de Android Auto da central que encerramos ao trancar.
      *
-     * O `.app` sozinho NAO bastou: no teste de 04/09 o force-stop nele voltou ok, o
-     * pidof confirmou o processo morto, e o telefone continuou conectado. O `.app` e a
-     * parte de tela (.display.AapActivity) — quem sustenta a sessao AAP e o AP do
-     * Wi-Fi e o `projectionservice`, que a lista de pacotes daquele mesmo log revelou.
+     * ATENCAO ao historico antes de mexer aqui — tres palpites meus falharam em campo:
      *
-     * Duas familias convivem na ROM, `ts` e `autolink`, e nao se sabe qual esta ativa;
-     * encerrar as duas e barato porque a inativa nao tem processo rodando. CarPlay fica
-     * de fora: nao tem como estar servindo um telefone Android.
+     * 1. com.google.android.projection.gearhead (v1.2.0): e o app do CELULAR, nem
+     *    existe na central. O force-stop falhava em silencio.
+     * 2. com.ts.androidauto.app (v1.5.0): existe e morre — o log confirma
+     *    `pid N -> encerrado` — e o telefone SEGUE conectado. E so a parte de tela
+     *    (.display.AapActivity).
+     * 3. com.ts.androidauto.projectionservice (v1.6.0): o pacote existe, mas em
+     *    tres eventos de tranca ele NUNCA teve processo — "nao estava rodando".
+     *
+     * Ou seja: quem sustenta a sessao do AAW nao e nenhum destes, e a hipotese do
+     * LocalOnlyHotspot amarrado ao app esta desmentida. Por isso a v1.7.0 nao adiciona
+     * um quarto palpite: adiciona dumpProjectionDiagnostics(), que coleta os fatos.
+     *
+     * A lista fica porque encerrar e barato e correto de qualquer forma; ela so nao e
+     * suficiente. CarPlay fica de fora: nao serve um telefone Android.
      */
     private static final String[] ANDROID_AUTO_PACKAGES = {
             "com.ts.androidauto.projectionservice",
@@ -132,6 +140,14 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      */
     private static final long LOCK_RECHECK_DELAY_MS = 3_000;
     private static final int  LOCK_RECHECK_MAX      = 4;
+    /**
+     * Quando reconferir se algum processo de Android Auto voltou depois do force-stop.
+     *
+     * A conferencia imediata (milissegundos) so prova que o `am` matou o processo — nao
+     * que ele ficou morto. Se a ROM reinicia o app de sistema em seguida, a sessao
+     * volta e o log anterior diria "encerrado" sem mentir e sem ajudar.
+     */
+    private static final long[] AA_RECHECK_DELAYS_MS = {10_000, 30_000};
 
     private static Method getServiceMethod;
 
@@ -606,8 +622,10 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private void applyRadiosOff() {
         boolean acted = false;
         if (prefs.getBoolean(Prefs.STOP_ANDROID_AUTO_ON_LOCK, Prefs.DEF_STOP_ANDROID_AUTO)) {
+            dumpProjectionDiagnostics("antes do force-stop");
             if (stopAndroidAuto()) log("Android Auto encerrado");
             else log("nenhum processo de Android Auto estava rodando para encerrar");
+            scheduleAaRechecks();
         }
         if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
                 && isBluetoothOn()) {
@@ -878,6 +896,62 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
     private String pidof(String pkg) {
         return ShizukuUtils.run(new String[]{"pidof", pkg}).stdout.trim();
+    }
+
+    /** Agenda conferencias tardias: o processo morreu, mas ficou morto? */
+    private void scheduleAaRechecks() {
+        for (long delay : AA_RECHECK_DELAYS_MS) {
+            react.postDelayed(() -> {
+                StringBuilder vivos = new StringBuilder();
+                for (String pkg : ANDROID_AUTO_PACKAGES) {
+                    String pid = pidof(pkg);
+                    if (!pid.isEmpty()) vivos.append(pkg).append('(').append(pid).append(") ");
+                }
+                PersistentLog.w(TAG, "AA " + (delay / 1000) + "s depois: "
+                        + (vivos.length() == 0 ? "segue tudo encerrado"
+                                               : "VOLTOU -> " + vivos.toString().trim()));
+            }, delay);
+        }
+    }
+
+    /**
+     * Fotografia do estado da projecao, escrita no log.
+     *
+     * Existe porque tres palpites meus sobre quem sustenta a sessao do Android Auto sem
+     * fio custaram tres rodadas de teste no carro: primeiro o pacote do celular
+     * (gearhead), depois o app de tela (com.ts.androidauto.app), depois o
+     * projectionservice — que o log de 04/09 mostrou nem ter processo. Em vez de um
+     * quarto palpite, isto coleta os fatos: quais processos existem, quais interfaces
+     * de rede estao de pe, quem detem o softAP e quais servicos de projecao rodam.
+     *
+     * Cada comando tem saida limitada — isto vai para um log rotativo de 192 KB.
+     */
+    private void dumpProjectionDiagnostics(String quando) {
+        PersistentLog.w(TAG, "===== diagnostico de projecao (" + quando + ") =====");
+        shDump("processos",
+                "ps -A -o PID,ARGS | grep -iE 'androidauto|carplay|projection|aap|carlife' "
+                        + "| grep -v grep | head -12");
+        shDump("interfaces", "ip -o addr | sed 's/  */ /g' | cut -c1-100 | head -12");
+        shDump("softap", "dumpsys wifi | grep -iE 'softap|local.?only|ap_state|apinterface' "
+                + "| head -12");
+        shDump("servicos de projecao",
+                "dumpsys activity services | grep -iE 'androidauto|carplay|projection' "
+                        + "| head -15");
+        shDump("bluetooth conectado",
+                "dumpsys bluetooth_manager | grep -iE 'connected|mconnection' | head -10");
+        PersistentLog.w(TAG, "===== fim do diagnostico =====");
+    }
+
+    private void shDump(String rotulo, String cmd) {
+        ShizukuUtils.ShellResult r = ShizukuUtils.run(new String[]{"sh", "-c", cmd + " 2>&1"});
+        String saida = r.stdout.trim();
+        if (saida.isEmpty()) {
+            PersistentLog.w(TAG, "[" + rotulo + "] (vazio) " + r.describeFailure());
+            return;
+        }
+        for (String linha : saida.split("\n")) {
+            PersistentLog.w(TAG, "[" + rotulo + "] " + linha.trim());
+        }
     }
 
     /** Uma vez no arranque: registra qual receiver de projecao existe nesta central. */

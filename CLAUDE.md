@@ -92,51 +92,27 @@ O objetivo real dessa funcionalidade é derrubar a sessão do **Android Auto sem
 quando o motorista sai e tranca o carro — a central fica ligada alguns minutos depois
 disso e o telefone continuava conectado.
 
-### O receiver é `com.ts.androidauto.app` — não o gearhead
+### Quem sustenta a sessão ainda é DESCONHECIDO — três palpites falharam
 
-`com.google.android.projection.gearhead` é o app do **celular**. Ele não está instalado
-na central, e o `am force-stop` nele (v1.2.0–v1.4.0) falhava em silêncio — quem
-derrubava a sessão era, na prática, só o `svc wifi disable`.
-
-O receiver real do head unit está medido no carro:
-`com.ts.androidauto.app/.display.AapActivity`, app de sistema VENDOR, Android 9. Ver a
-memória `central-haval-fatos` e o `WindowModeUtils.kt` do haval-engine-reverse.
-
-### O `.app` não basta — quem sustenta a sessão é o `projectionservice`
-
-Medido em campo (log de 2026-09-04): `am force-stop com.ts.androidauto.app` voltou
-`ok`, o `pidof` confirmou o processo morto, **e o telefone continuou conectado**. O
-`.app` é só a parte de tela (`.display.AapActivity`).
-
-A lista de pacotes do mesmo log revelou a resposta — a ROM tem oito pacotes de
-projeção, entre eles:
-
-```
-com.ts.androidauto.projectionservice
-com.autolink.androidauto.projectionservice
-```
-
-É o `projectionservice` que sustenta a sessão AAP e o AP do Wi-Fi. Desde a v1.6.0 o app
-encerra as duas famílias (`ts` e `autolink` — não se sabe qual está ativa, e a inativa
-não tem processo, então é barato). CarPlay fica de fora: não serve um telefone Android.
-
-**O `pidof` agora é lido ANTES também.** Sem o valor anterior, "processo morto" não
-distingue "matamos" de "nunca estava rodando" — foi essa ambiguidade que fez o log
-dizer `encerrado` enquanto a sessão seguia viva em outro processo.
-
-Ordem por invasividade:
-
-| Ação | Default | Efeito colateral |
+| Versão | Alvo | O que o log de campo mostrou |
 |---|---|---|
-| `am force-stop` nos 4 pacotes de AA | **on** | nenhum |
-| `svc bluetooth disable` | off | perde viva-voz |
-| `svc wifi disable` | off | perde internet da central |
+| v1.2.0–1.4.0 | `com.google.android.projection.gearhead` | é o app do **celular**, nem existe na central — force-stop falhava em silêncio, e quem derrubava a sessão era o `svc wifi disable` |
+| v1.5.0–1.5.1 | `com.ts.androidauto.app` | existe e **morre** (`pid N -> encerrado`), telefone **segue conectado**. É só a tela (`.display.AapActivity`) |
+| v1.6.0 | `com.ts.androidauto.projectionservice` | pacote existe, mas em 3 eventos de tranca **nunca teve processo** |
 
-Os dois últimos ficaram como último recurso, para o caso de o receiver reiniciar
-sozinho. Eram default `true` só enquanto o alvo do force-stop estava errado.
+Conclusão: a hipótese de que o AP do AAW é um `LocalOnlyHotspot` amarrado ao app está
+**desmentida** — matar o único processo de AA que roda não derruba a conexão.
 
-O `stopAndroidAuto()` **confere com `pidof`** depois do force-stop: recusar matar app de
-sistema não necessariamente devolve exit != 0 no `am`.
+A v1.7.0 **não adiciona um quarto palpite**. Adiciona `dumpProjectionDiagnostics()`,
+que escreve no log, na hora da tranca: processos com nome de projeção, interfaces de
+rede com IP, estado do softAP no `dumpsys wifi`, serviços de projeção ativos e
+dispositivos Bluetooth conectados. Mais `scheduleAaRechecks()` em 10 s e 30 s — a
+conferência imediata só prova que o `am` matou o processo, não que ele ficou morto.
+
+O receiver está medido como `com.ts.androidauto.app/.display.AapActivity` (app de
+sistema VENDOR, Android 9) — ver a memória `central-haval-fatos`. A ROM tem **oito**
+pacotes de projeção, entre eles duas famílias (`ts` e `autolink`) de androidauto e
+carplay.
 
 `IConnectivityManager.stopTethering` (o que o app-tool usa) não serve para nada aqui —
 desliga o AP do tethering, que é outro. Os `.aidl` de
