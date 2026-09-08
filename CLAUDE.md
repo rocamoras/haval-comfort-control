@@ -92,22 +92,54 @@ O objetivo real dessa funcionalidade é derrubar a sessão do **Android Auto sem
 quando o motorista sai e tranca o carro — a central fica ligada alguns minutos depois
 disso e o telefone continuava conectado.
 
-### Quem sustenta a sessão ainda é DESCONHECIDO — três palpites falharam
+### O transporte está medido; o processo dono, não — e o `pidof` mentia
 
 | Versão | Alvo | O que o log de campo mostrou |
 |---|---|---|
 | v1.2.0–1.4.0 | `com.google.android.projection.gearhead` | é o app do **celular**, nem existe na central — force-stop falhava em silêncio, e quem derrubava a sessão era o `svc wifi disable` |
 | v1.5.0–1.5.1 | `com.ts.androidauto.app` | existe e **morre** (`pid N -> encerrado`), telefone **segue conectado**. É só a tela (`.display.AapActivity`) |
-| v1.6.0 | `com.ts.androidauto.projectionservice` | pacote existe, mas em 3 eventos de tranca **nunca teve processo** |
+| v1.6.0 | `com.ts.androidauto.projectionservice` | "nunca teve processo" — **conclusão errada, ver abaixo** |
+| v1.7.0 | ninguém (só `dumpProjectionDiagnostics()`) | 10 eventos de tranca com fatos: o transporte é STA, e o `pidof` é inconfiável |
 
-Conclusão: a hipótese de que o AP do AAW é um `LocalOnlyHotspot` amarrado ao app está
-**desmentida** — matar o único processo de AA que roda não derruba a conexão.
+**A central é cliente STA, não AP.** Nos 10 eventos, `wlan2` tem IP por DHCP em
+`192.168.33.0/24` com host diferente a cada sessão (.17 .40 .42 .82 .137 .163 .191 .199
+.239 .245), e `mSoftApTetheredEvents:`/`mSoftApLocalOnlyEvents:` vêm **vazios**. Não
+existe softAP local — o `mApInterfaceName: wlan2` do dump é config residual do
+`SoftApManager`. Quem cria o hotspot é o **celular**. Isso fecha a questão de por que
+`svc wifi disable` derruba e matar processo não: a sessão vive no link STA do `wlan2`.
 
-A v1.7.0 **não adiciona um quarto palpite**. Adiciona `dumpProjectionDiagnostics()`,
-que escreve no log, na hora da tranca: processos com nome de projeção, interfaces de
-rede com IP, estado do softAP no `dumpsys wifi`, serviços de projeção ativos e
-dispositivos Bluetooth conectados. Mais `scheduleAaRechecks()` em 10 s e 30 s — a
-conferência imediata só prova que o `am` matou o processo, não que ele ficou morto.
+**`pidof <pacote>` não serve aqui** — ele casa por *nome de processo*. Os processos vivos
+em toda tranca são `com.ts.carplay`, `com.ts.androidauto`, `com.ts.carplay.app` e
+`com.ts.androidauto.app`; `com.ts.androidauto` **não é pacote instalado** (não sai no
+`pm list packages` do próprio log), é nome de processo de outro pacote. A prova de que a
+linha da v1.6.0 era artefato de medição está no evento de 06/09 13:10:55: o
+`dumpsys activity services` trouxe
+`ServiceRecord{... com.ts.androidauto.projectionservice/.AndroidAutoService}` **ativo** no
+mesmo instante em que o log dizia "nao estava rodando". E como `stopAndroidAuto()` faz
+`continue` quando o `pidof` vem vazio, esse pacote **nunca foi force-stopado de verdade**.
+
+Ainda: `com.ts.carplay.app/.service.CarPlayRemoteService` é o serviço de projeção
+**compartilhado** — `com.ts.androidauto` e `com.ts.carplay` aparecem como `AppBindRecord`
+clientes dele em todas as trancas, e nenhum dos dois estava na lista de kill.
+
+### v1.8.0 — dois testes manuais, um botão cada
+
+`utils/ProjectionProbe.kt`, no botão **Teste AAW** do cabeçalho. Testes à mão e não um
+quarto palpite no gatilho: são duas hipóteses concorrentes e só o carro decide qual vale.
+
+- **Derrubar wlan2** — escada de `ip link set wlan2 down` → `ifconfig wlan2 down` →
+  `ndc interface setcfg wlan2 down`, parando no primeiro que faz a interface perder o
+  IPv4. Nenhum é garantido com uid de shell (`CAP_NET_ADMIN`), e é por isso que é uma
+  escada com o resultado de cada degrau no log. Se algum funcionar, o Wi-Fi de casa
+  (`wlan0`) fica de pé — que é o que o `svc wifi disable` levava junto.
+- **Force-stop projeção** — os 8 pacotes, **sem gate de `pidof`**, CarPlay incluído. O
+  diff de pids entre antes e depois dá a evidência causal sem depender do mapeamento
+  processo↔pacote; um `dumpsys activity processes` no relatório resolve de quem é o
+  processo `com.ts.androidauto`.
+
+O que decide em ambos não é o comando ter rodado, é o `wlan2` perder o IPv4 — por isso os
+dois fotografam a interface antes, depois e 5 s depois. O relatório aparece no diálogo e
+vai para o `PersistentLog`, então sai no próximo **Log → Enviar**.
 
 O receiver está medido como `com.ts.androidauto.app/.display.AapActivity` (app de
 sistema VENDOR, Android 9) — ver a memória `central-haval-fatos`. A ROM tem **oito**

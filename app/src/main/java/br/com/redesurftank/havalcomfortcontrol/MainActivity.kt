@@ -64,6 +64,7 @@ import br.com.redesurftank.havalcomfortcontrol.ui.theme.HavalComfortControlTheme
 import br.com.redesurftank.havalcomfortcontrol.utils.ApkInstaller
 import br.com.redesurftank.havalcomfortcontrol.utils.LogUploader
 import br.com.redesurftank.havalcomfortcontrol.utils.PersistentLog
+import br.com.redesurftank.havalcomfortcontrol.utils.ProjectionProbe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -160,6 +161,15 @@ private fun ComfortScreen() {
     var uploadStatus  by remember { mutableStateOf("") }
     var uploadUrl     by remember { mutableStateOf("") }
 
+    // Testes de campo do Android Auto sem fio. São duas hipóteses concorrentes tiradas
+    // do log da v1.7.0 e cada uma tem seu botão: derrubar só a wlan2 (a central é
+    // cliente STA do hotspot do celular) e force-stop incondicional dos pacotes de
+    // projeção (o `pidof` mentia e o projectionservice nunca foi realmente encerrado).
+    // Ver ProjectionProbe para a evidência de cada uma.
+    var showProbeDialog by remember { mutableStateOf(false) }
+    var probeReport     by remember { mutableStateOf("") }
+    var probeRunning    by remember { mutableStateOf("") }
+
     LaunchedEffect(Unit) {
         try {
             currentVersion = context.packageManager
@@ -191,6 +201,23 @@ private fun ComfortScreen() {
                     }
                     is LogUploader.Result.Err -> uploadStatus = "Erro: ${result.message}"
                 }
+            }
+        }
+    }
+
+    /**
+     * Roda um dos testes de AAW numa thread de fundo. Cada teste gasta ~5 s parado de
+     * propósito (conferência tardia da interface), então nada disso pode ir na main.
+     */
+    fun runProbe(nome: String, probe: () -> String) {
+        probeRunning = nome
+        probeReport  = ""
+        scope.launch(Dispatchers.IO) {
+            val report = probe()
+            withContext(Dispatchers.Main) {
+                probeRunning = ""
+                probeReport  = report
+                ComfortStateHolder.log("teste \"$nome\" concluido — ver relatorio")
             }
         }
     }
@@ -352,6 +379,18 @@ private fun ComfortScreen() {
             }
             Spacer(Modifier.width(10.dp))
             Button(
+                onClick = {
+                    showProbeDialog = true
+                    probeReport = ""
+                },
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6A1B9A)),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Teste AAW", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.width(10.dp))
+            Button(
                 onClick = { checkForUpdates() },
                 enabled = !isChecking && !isDownloading,
                 contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
@@ -492,6 +531,79 @@ private fun ComfortScreen() {
     }
 
     // ── Diálogos ──
+    if (showProbeDialog) {
+        AlertDialog(
+            onDismissRequest = { if (probeRunning.isEmpty()) showProbeDialog = false },
+            title = { Text("Teste — Android Auto sem fio") },
+            text = {
+                Column {
+                    Text(
+                        "Duas hipóteses do log da v1.7.0, uma por botão. Conecte o AA sem "
+                                + "fio antes: o teste só conclui algo se a wlan2 tiver IP. "
+                                + "Depois de rodar, olhe o celular.",
+                        fontSize = 13.sp, color = HmiFgMuted
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ProbeButton(
+                            modifier = Modifier.weight(1f),
+                            label = "Derrubar wlan2",
+                            hint = "Só a interface do AAW. O Wi-Fi de casa (wlan0) fica. "
+                                    + "Pode exigir reconectar o AA depois.",
+                            container = Color(0xFF00695C),
+                            busy = probeRunning == "Derrubar wlan2",
+                            enabled = probeRunning.isEmpty()
+                        ) { runProbe("Derrubar wlan2", ProjectionProbe::dropAawInterface) }
+
+                        ProbeButton(
+                            modifier = Modifier.weight(1f),
+                            label = "Force-stop projeção",
+                            hint = "Os 8 pacotes, sem consultar pidof — inclui CarPlay, "
+                                    + "que hospeda o serviço compartilhado.",
+                            container = Color(0xFF8D6E63),
+                            busy = probeRunning == "Force-stop projeção",
+                            enabled = probeRunning.isEmpty()
+                        ) { runProbe("Force-stop projeção", ProjectionProbe::forceStopProjection) }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(300.dp)
+                            .background(Color(0xFF0A0A0A), RoundedCornerShape(8.dp))
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            when {
+                                probeRunning.isNotEmpty() ->
+                                    "Rodando \"$probeRunning\"…\n\nA conferência tardia da " +
+                                            "interface leva 5 s — isto não travou."
+                                probeReport.isNotEmpty() -> probeReport
+                                else -> "(nenhum teste rodado ainda)"
+                            },
+                            fontSize = 12.sp,
+                            color = HmiFgMuted,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.verticalScroll(rememberScrollState())
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "O relatório também vai para o log persistente — sai no próximo "
+                                + "Log → Enviar.",
+                        fontSize = 12.sp, color = HmiFgDim
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showProbeDialog = false },
+                    enabled = probeRunning.isEmpty()
+                ) { Text("Fechar") }
+            }
+        )
+    }
+
     if (showLogDialog) {
         AlertDialog(
             onDismissRequest = { showLogDialog = false },
@@ -651,6 +763,42 @@ private fun ComfortScreen() {
  * Cartão de uma funcionalidade. O segundo switch existe para "Rádios ao desligar",
  * onde Bluetooth e âncora são a mesma funcionalidade com dois interruptores.
  */
+/**
+ * Botão de teste com a legenda embaixo. Cada hipótese de AAW tem o seu, e a legenda
+ * existe porque o efeito colateral de cada um é diferente — derrubar a wlan2 pode exigir
+ * reconectar o AA, e o force-stop mexe em app de sistema.
+ */
+@Composable
+private fun ProbeButton(
+    modifier: Modifier = Modifier,
+    label: String,
+    hint: String,
+    container: Color,
+    busy: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Column(modifier = modifier) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = container),
+            shape = RoundedCornerShape(10.dp)
+        ) {
+            if (busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(15.dp), color = HmiFg, strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(label, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(hint, fontSize = 12.sp, color = HmiFgDim)
+    }
+}
+
 @Composable
 private fun FeatureCard(
     modifier: Modifier = Modifier,
