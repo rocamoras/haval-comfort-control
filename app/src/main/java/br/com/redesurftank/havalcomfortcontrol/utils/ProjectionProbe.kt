@@ -1,54 +1,49 @@
 package br.com.redesurftank.havalcomfortcontrol.utils
 
 /**
- * Dois testes de campo, disparados à mão pela UI, para descobrir o que derruba a sessão
- * do **Android Auto sem fio**.
+ * Dois testes de campo, disparados à mão pela UI. **Os dois já rodaram no carro
+ * (09/09/2026) e deram resposta** — ficam porque são o instrumento que responde de novo
+ * se a ROM ou o telefone mudarem, e porque o relatório deles é o que documenta o
+ * comportamento atual.
  *
- * ## Por que testes manuais e não um quarto palpite no gatilho da tranca
+ * ### [forceStopProjection] — respondido: NÃO derruba a sessão
  *
- * Três palpites sobre quem sustenta a sessão já custaram três rodadas de teste no carro
- * (ver o histórico em `ANDROID_AUTO_PACKAGES` no serviço). O log da v1.7.0, com
- * `dumpProjectionDiagnostics()`, finalmente trouxe fatos em vez de palpite — e eles
- * apontam para duas hipóteses concretas, uma por função aqui:
+ * Os oito pacotes force-stopados sem gate de `pidof`, os quatro processos vivos mortos,
+ * nenhum de volta em 5 s — e a interface seguiu com IP e o vizinho `REACHABLE`:
+ * ```
+ * MORTOS: 3546/com.ts.carplay 3754/com.ts.carplay.app 3785/com.ts.androidauto.app 3818/com.ts.androidauto
+ * SOBREVIVERAM: (nenhum)
+ * RESULTADO: wlan2 seguiu com 192.168.33.52 -> matar processo NAO derruba a sessao
+ * ```
+ * Nenhum processo da central sustenta a sessão. Isso encerrou quatro versões de palpite
+ * de force-stop (v1.2.0 a v1.8.0) e é por isso que o serviço não force-stopa mais nada.
  *
- * ### 1. [dropAawInterface] — a central é **cliente STA**, não AP
+ * O teste também fechou o enigma do `pidof`, que casa por *nome de processo*:
+ * `app=ProcessRecord{... 3818:com.ts.androidauto/1000}` no `ServiceRecord` do
+ * `com.ts.androidauto.projectionservice` prova que o processo dele se chama
+ * `com.ts.androidauto` — que não é pacote instalado. A conclusão da v1.6.0 de que esse
+ * pacote "nunca tinha processo" era artefato de medição, e o gate de `pidof` que existia
+ * no serviço fazia com que ele nunca fosse realmente encerrado.
  *
- * Nos 10 eventos de tranca do log de 08/09/2026, sem exceção: `wlan2` tem IP por DHCP
- * em `192.168.33.0/24`, com host diferente a cada sessão (.17 .40 .42 .82 .137 .163
- * .191 .199 .239 .245), e o `dumpsys wifi` mostra `mSoftApTetheredEvents:` e
- * `mSoftApLocalOnlyEvents:` **vazios**. Não existe softAP local — o `mApInterfaceName:
- * wlan2` do dump é config residual do `SoftApManager`, não AP ativo.
+ * ### [dropAawInterface] — respondido: só o `ndc`
  *
- * Quem cria o hotspot é o **celular**. Isso explica por que `svc wifi disable` derrubava
- * a sessão e matar processo nunca derrubou: a sessão vive no link STA do `wlan2`. Se
- * derrubar só essa interface funcionar, a central fica com o Wi-Fi de casa (`wlan0`)
- * intacto — que é o que o `svc wifi disable` levava embora junto.
+ * ```
+ * [ip link set wlan2 down]            ok | ip agora=192.168.33.52
+ * [ifconfig wlan2 down]               ok | ip agora=192.168.33.52
+ * [ndc interface setcfg wlan2 down]   ok | ip agora=(nenhum) -> CAIU
+ * ```
+ * Os dois primeiros devolveram **exit 0 sem fazer nada**. É esse comando que virou
+ * produção em [AawLink.setUp], usado pelo pisca dos rádios na tranca.
  *
- * ### 2. [forceStopProjection] — o `pidof` mentiu, e o alvo certo nunca foi testado
+ * Cuidado ao rodar este teste: ele derruba a interface e **não a levanta de volta**. Foi
+ * assim que a central ficou sem Android Auto (e com o áudio do telefone preso, porque o
+ * Bluetooth seguiu conectado) depois da rodada de 09/09. Quem restaura é o pisca do
+ * serviço, não o teste.
  *
- * `pidof <pacote>` casa por **nome de processo**. Os processos vivos em toda tranca são
- * `com.ts.carplay`, `com.ts.androidauto`, `com.ts.carplay.app` e
- * `com.ts.androidauto.app` — e `com.ts.androidauto` **não é pacote instalado** (não sai
- * no `pm list packages` do próprio log), é nome de processo de outro pacote.
+ * ## Como os dois provam algo
  *
- * Logo, a conclusão da v1.6.0 de que `com.ts.androidauto.projectionservice` "nunca tem
- * processo" era **artefato do `pidof`**: no evento de 06/09 13:10:55 o
- * `dumpsys activity services` trouxe
- * `ServiceRecord{... com.ts.androidauto.projectionservice/.AndroidAutoService}` ativo no
- * mesmo instante em que o log dizia "nao estava rodando". E como `stopAndroidAuto()` faz
- * `continue` quando o `pidof` vem vazio, esse pacote **nunca foi force-stopado de
- * verdade**.
- *
- * Por isso aqui o force-stop é **incondicional** — o `am force-stop` recebe pacote e não
- * precisa de pid — e inclui os pacotes de CarPlay: o
- * `com.ts.carplay.app/.service.CarPlayRemoteService` é o serviço de projeção
- * *compartilhado*, com `com.ts.androidauto` e `com.ts.carplay` como clientes bindados
- * nele em todas as trancas.
- *
- * ## Como os dois testes provam algo
- *
- * O que decide não é o comando ter rodado, é o `wlan2` perder o IPv4. Por isso as duas
- * funções fotografam a interface **antes**, **depois** e **5 s depois** — a conferência
+ * O que decide não é o comando ter rodado, é a interface perder o IPv4. Por isso as duas
+ * funções fotografam o link **antes**, **depois** e **5 s depois** — a conferência
  * imediata só prova que o comando executou, não que a sessão caiu nem que ficou caída.
  *
  * Tudo aqui é bloqueante (shell via Shizuku, mais uma espera de 5 s) — chame de uma
@@ -59,9 +54,6 @@ package br.com.redesurftank.havalcomfortcontrol.utils
 object ProjectionProbe {
 
     private const val TAG = "ProjectionProbe"
-
-    /** Interface do AAW nesta central — medida em campo, sempre `192.168.33.0/24`. */
-    private const val AAW_IFACE = "wlan2"
 
     /** Espera antes da segunda conferência: o link pode voltar sozinho. */
     private const val RECHECK_DELAY_MS = 5_000L
@@ -88,16 +80,17 @@ object ProjectionProbe {
     /**
      * Tentativas de derrubar a interface, da menos para a mais exótica.
      *
-     * Nenhuma é garantida com uid de `shell`: `ip link set ... down` exige
-     * `CAP_NET_ADMIN`, que o shell não tem por padrão no Android 9, e o `ndc` fala com o
-     * `netd`, que costuma exigir root. É exatamente por isso que isto é uma escada com
-     * o resultado de cada degrau no log em vez de um comando só — o teste de campo diz
-     * qual (se algum) esta ROM aceita.
+     * Nenhuma era garantida com uid de `shell`: `ip link set ... down` exige
+     * `CAP_NET_ADMIN`, que o shell não tem no Android 9, e o `ndc` fala com o `netd`,
+     * que costuma exigir root. O teste de 09/09 respondeu: só o `ndc` funciona, e os
+     * outros dois devolvem exit 0 sem fazer nada. A escada fica porque o valor dela é
+     * justamente medir isso de novo se a ROM mudar — o `ndc` é o último degrau, e
+     * [AawLink.setUp] é quem o executa em produção.
      */
     private val IFACE_DOWN_COMMANDS = arrayOf(
-        "ip link set $AAW_IFACE down",
-        "ifconfig $AAW_IFACE down",
-        "ndc interface setcfg $AAW_IFACE down",
+        "ip link set ${AawLink.IFACE} down",
+        "ifconfig ${AawLink.IFACE} down",
+        "ndc interface setcfg ${AawLink.IFACE} down",
     )
 
     // ─────────────────────────────────────────────────────────────
@@ -107,20 +100,20 @@ object ProjectionProbe {
     /** Devolve o relatório do teste, já escrito também no [PersistentLog]. */
     fun dropAawInterface(): String {
         val r = Report()
-        r.line("===== teste: derrubar so a $AAW_IFACE =====")
+        r.line("===== teste: derrubar so a ${AawLink.IFACE} =====")
         if (!requireShizuku(r)) return r.finish()
 
-        val ipAntes = ipv4Of(AAW_IFACE)
+        val ipAntes = AawLink.ipv4()
         snapshotIface(r, "antes")
         if (ipAntes == null) {
-            r.line("AVISO: $AAW_IFACE sem IPv4 — a sessao do AAW parece nao estar de pe.")
+            r.line("AVISO: ${AawLink.IFACE} sem IPv4 — a sessao do AAW parece nao estar de pe.")
             r.line("       O teste segue, mas so mede se o comando executa, nao se derruba.")
         }
 
         var venceu: String? = null
         for (cmd in IFACE_DOWN_COMMANDS) {
             val res = sh(cmd)
-            val ipDepois = ipv4Of(AAW_IFACE)
+            val ipDepois = AawLink.ipv4()
             val caiu = ipDepois == null && ipAntes != null
             r.line("[$cmd] ${res.describeFailure()} | ip agora=${ipDepois ?: "(nenhum)"}"
                     + if (caiu) " -> CAIU" else "")
@@ -128,11 +121,11 @@ object ProjectionProbe {
         }
 
         if (venceu == null) {
-            r.line("RESULTADO: nenhum comando derrubou a $AAW_IFACE com uid de shell.")
+            r.line("RESULTADO: nenhum comando derrubou a ${AawLink.IFACE} com uid de shell.")
             r.line("           Resta `svc wifi disable` (o toggle invasivo no cartao),")
             r.line("           que leva o Wi-Fi de casa junto.")
         } else {
-            r.line("RESULTADO: `$venceu` derrubou a $AAW_IFACE.")
+            r.line("RESULTADO: `$venceu` derrubou a ${AawLink.IFACE}.")
         }
 
         sleep(RECHECK_DELAY_MS)
@@ -152,10 +145,10 @@ object ProjectionProbe {
         r.line("===== teste: force-stop de todos os pacotes de projecao =====")
         if (!requireShizuku(r)) return r.finish()
 
-        val antes = projectionProcesses()
-        val ipAntes = ipv4Of(AAW_IFACE)
+        val antes = AawLink.projectionProcesses()
+        val ipAntes = AawLink.ipv4()
         snapshotIface(r, "antes")
-        r.line("[processos antes] " + describe(antes))
+        r.line("[processos antes] " + AawLink.describe(antes))
         snapshotServices(r, "antes")
         // O que resolve o enigma do `pidof`: qual PACOTE e dono do processo chamado
         // `com.ts.androidauto`, que nao existe como pacote instalado.
@@ -169,17 +162,17 @@ object ProjectionProbe {
             r.line("[force-stop $pkg] ${res.describeFailure()}")
         }
 
-        val depois = projectionProcesses()
+        val depois = AawLink.projectionProcesses()
         val mortos = antes.keys - depois.keys
         val vivos  = antes.keys intersect depois.keys
-        r.line("[processos depois] " + describe(depois))
+        r.line("[processos depois] " + AawLink.describe(depois))
         r.line("MORTOS: " + if (mortos.isEmpty()) "(nenhum)"
                             else mortos.joinToString(" ") { "$it/${antes[it]}" })
         r.line("SOBREVIVERAM: " + if (vivos.isEmpty()) "(nenhum)"
                                   else vivos.joinToString(" ") { "$it/${antes[it]}" })
-        val ipDepois = ipv4Of(AAW_IFACE)
+        val ipDepois = AawLink.ipv4()
         snapshotIface(r, "depois")
-        r.line("RESULTADO: $AAW_IFACE ${
+        r.line("RESULTADO: ${AawLink.IFACE} ${
             when {
                 ipAntes == null  -> "nao tinha IPv4 antes — teste inconclusivo, conecte o AAW primeiro"
                 ipDepois == null -> "PERDEU o IPv4 -> matar processo DERRUBA a sessao"
@@ -205,27 +198,21 @@ object ProjectionProbe {
         return false
     }
 
-    /** IPv4 da interface, ou null se ela não tem endereço (ou não existe). */
-    private fun ipv4Of(iface: String): String? {
-        val out = sh("ip -o -4 addr show $iface").stdout
-        return Regex("""inet (\d+\.\d+\.\d+\.\d+)""").find(out)?.groupValues?.get(1)
-    }
-
     /**
      * Estado da interface: flags do link, IP, e o vizinho — que é o **celular**, e é a
      * evidência de que o AP é dele e não da central.
      */
     private fun snapshotIface(r: Report, quando: String) {
-        val link = sh("ip link show $AAW_IFACE | head -1").stdout
+        val link = sh("ip link show ${AawLink.IFACE} | head -1").stdout
             .substringAfter(':').trim().take(90)
-        val ip   = ipv4Of(AAW_IFACE) ?: "(nenhum)"
-        val ap   = sh("ip neigh show dev $AAW_IFACE | head -2").stdout
+        val ip   = AawLink.ipv4() ?: "(nenhum)"
+        val ap   = sh("ip neigh show dev ${AawLink.IFACE} | head -2").stdout
             .replace('\n', ' ').trim().take(90)
-        r.line("[$AAW_IFACE $quando] ip=$ip | link=$link | vizinho=${ap.ifEmpty { "(nenhum)" }}")
+        r.line("[${AawLink.IFACE} $quando] ip=$ip | link=$link | vizinho=${ap.ifEmpty { "(nenhum)" }}")
     }
 
     private fun snapshotProcesses(r: Report, quando: String) {
-        r.line("[processos $quando] " + describe(projectionProcesses()))
+        r.line("[processos $quando] " + AawLink.projectionProcessesLine())
     }
 
     private fun snapshotServices(r: Report, quando: String) {
@@ -233,30 +220,6 @@ object ProjectionProbe {
             "dumpsys activity services | grep -iE 'ServiceRecord|app=' "
                     + "| grep -iE 'androidauto|carplay|projection' | head -12")
     }
-
-    /**
-     * pid → nome de processo dos processos de projeção vivos.
-     *
-     * Via `ps`, e não `pidof`: é o nome de processo que aparece aqui, e ele **não** casa
-     * com o pacote (`com.ts.androidauto` é processo, não pacote). O diff de pids entre
-     * antes e depois é o que dá a evidência causal, sem depender desse mapeamento.
-     */
-    private fun projectionProcesses(): Map<String, String> {
-        val out = sh("ps -A -o PID,ARGS | grep -iE 'androidauto|carplay|projection|aap' "
-                + "| grep -v grep | head -12").stdout
-        val mapa = LinkedHashMap<String, String>()
-        for (linha in out.lineSequence()) {
-            val campos = linha.trim().split(Regex("""\s+"""), limit = 2)
-            if (campos.size == 2 && campos[0].all { it.isDigit() }) {
-                mapa[campos[0]] = campos[1].trim()
-            }
-        }
-        return mapa
-    }
-
-    private fun describe(procs: Map<String, String>): String =
-        if (procs.isEmpty()) "(nenhum)"
-        else procs.entries.joinToString(" ") { "${it.key}/${it.value}" }
 
     private fun shDump(r: Report, rotulo: String, cmd: String) {
         val res = sh(cmd)
@@ -268,9 +231,7 @@ object ProjectionProbe {
         for (linha in saida.split('\n')) r.line("[$rotulo] ${linha.trim().take(110)}")
     }
 
-    /** `2>&1` para que a mensagem de permissão negada entre no relatório. */
-    private fun sh(cmd: String): ShizukuUtils.ShellResult =
-        ShizukuUtils.run(arrayOf("sh", "-c", "$cmd 2>&1"))
+    private fun sh(cmd: String): ShizukuUtils.ShellResult = AawLink.sh(cmd)
 
     private fun sleep(ms: Long) {
         try { Thread.sleep(ms) } catch (_: InterruptedException) {}

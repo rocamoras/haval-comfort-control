@@ -28,11 +28,20 @@ public final class Prefs {
      */
     public static final String CLOSE_WINDOWS_ON_LOCK = "close_windows_on_lock";
     /**
-     * Encerra o receiver de Android Auto da central ao trancar. Acao PRINCIPAL da
-     * funcionalidade 2 — matar o receiver derruba a sessao e, com ela, o
-     * LocalOnlyHotspot que o AAW usava, sem tocar em radio nenhum.
+     * Pisca a interface do AAW e o Bluetooth ao trancar — acao PRINCIPAL da
+     * funcionalidade 2, e a que substituiu o force-stop dos pacotes de projecao.
+     *
+     * O force-stop foi medido em campo (09/09/2026) e nao serve: os quatro processos de
+     * projecao morreram, nenhum voltou em 5 s, e a wlan2 seguiu com IP e o vizinho
+     * REACHABLE. Nenhum processo da central sustenta a sessao. Ja
+     * `ndc interface setcfg wlan2 down` derrubou o link de verdade — enquanto
+     * `ip link set ... down` e `ifconfig ... down` devolveram exit 0 sem fazer nada.
+     *
+     * "Piscar" e nao "desligar" porque o objetivo e duplo: a sessao cai na hora em que
+     * o carro e trancado, e os radios voltam em seguida para que a proxima partida nao
+     * pague o custo de religar (~2 s medidos, mais o fallback do BluetoothAdapter).
      */
-    public static final String STOP_ANDROID_AUTO_ON_LOCK = "stop_android_auto_on_lock";
+    public static final String BOUNCE_RADIOS_ON_LOCK = "bounce_radios_on_lock";
     /** Ultimo recurso: desligar o radio inteiro. Default OFF — ver DEF_DISABLE_*. */
     public static final String DISABLE_BLUETOOTH_ON_LOCK = "disable_bluetooth_on_lock";
     /**
@@ -58,19 +67,33 @@ public final class Prefs {
      */
     public static final String VOLUME_APPLIED_THIS_CYCLE = "volume_applied_this_cycle";
     public static final String LAST_UPDATE_CHECK_MS      = "last_update_check_ms";
+    /**
+     * Um "pisca" comecou e ainda nao terminou de religar.
+     *
+     * Existe para a rede de seguranca do arranque: a janela de 10 s com os radios
+     * desligados e justamente quando a ROM costuma matar este processo (24 criacoes
+     * contra 2 destruicoes no log de 08/09), e sem esta flag a central acordaria com a
+     * wlan2 caida e o Bluetooth desligado, sem ninguem para religar. Fica em storage
+     * device-protected como todo o resto, entao sobrevive a um boot frio.
+     */
+    public static final String BOUNCE_PENDING     = "bounce_pending";
+    /** Estado dos radios ANTES do pisca, para restaurar so o que estava ligado. */
+    public static final String BOUNCE_BT_WAS_ON   = "bounce_bt_was_on";
+    public static final String BOUNCE_WIFI_WAS_ON = "bounce_wifi_was_on";
 
     // ── Defaults ──────────────────────────────────────────────────────
     public static final boolean DEF_CLOSE_WINDOWS_ON_LOCK        = true;
-    public static final boolean DEF_STOP_ANDROID_AUTO            = true;
+    public static final boolean DEF_BOUNCE_RADIOS                = true;
     /**
-     * Desligar os radios vem DESLIGADO por padrao.
+     * Desligar os radios E DEIXAR desligados vem DESLIGADO por padrao.
      *
-     * Era true enquanto o alvo do force-stop estava errado (usava o pacote do
-     * CELULAR, com.google.android.projection.gearhead, que nao existe na central) e
-     * portanto quem derrubava a sessao era o `svc wifi disable`. Com o receiver certo
-     * — com.ts.androidauto.app — matar o app basta, e desligar Wi-Fi/Bluetooth da
-     * central passa a ser custo sem beneficio: a central perde internet e viva-voz
-     * enquanto o carro esta trancado.
+     * Sao o ultimo recurso, para o caso de o pisca nao derrubar a sessao: o
+     * `svc wifi disable` esta comprovado desde a v1.2.0, ao custo de a central ficar
+     * sem internet e sem viva-voz enquanto o carro esta trancado.
+     *
+     * Quando BOUNCE_RADIOS_ON_LOCK esta ligado ele e quem manda nos radios na tranca, e
+     * estes dois sao ignorados — ver applyRadiosOff(). Sem essa regra os dois modos
+     * brigariam: o pisca religa por projeto e a guarda destes reverteria o religamento.
      */
     public static final boolean DEF_DISABLE_BLUETOOTH            = false;
     public static final boolean DEF_DISABLE_WIFI                 = false;

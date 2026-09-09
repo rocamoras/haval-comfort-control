@@ -92,54 +92,91 @@ O objetivo real dessa funcionalidade é derrubar a sessão do **Android Auto sem
 quando o motorista sai e tranca o carro — a central fica ligada alguns minutos depois
 disso e o telefone continuava conectado.
 
-### O transporte está medido; o processo dono, não — e o `pidof` mentia
+### Quem sustenta a sessão: respondido — é o link STA, não um processo
 
 | Versão | Alvo | O que o log de campo mostrou |
 |---|---|---|
 | v1.2.0–1.4.0 | `com.google.android.projection.gearhead` | é o app do **celular**, nem existe na central — force-stop falhava em silêncio, e quem derrubava a sessão era o `svc wifi disable` |
-| v1.5.0–1.5.1 | `com.ts.androidauto.app` | existe e **morre** (`pid N -> encerrado`), telefone **segue conectado**. É só a tela (`.display.AapActivity`) |
-| v1.6.0 | `com.ts.androidauto.projectionservice` | "nunca teve processo" — **conclusão errada, ver abaixo** |
-| v1.7.0 | ninguém (só `dumpProjectionDiagnostics()`) | 10 eventos de tranca com fatos: o transporte é STA, e o `pidof` é inconfiável |
+| v1.5.0–1.5.1 | `com.ts.androidauto.app` | existe e **morre**, telefone **segue conectado**. É só a tela (`.display.AapActivity`) |
+| v1.6.0 | `com.ts.androidauto.projectionservice` | "nunca teve processo" — **artefato do `pidof`** |
+| v1.7.0 | ninguém (só diagnóstico) | 10 trancas de fatos: o transporte é STA e o `pidof` é inconfiável |
+| v1.8.0 | os 8 pacotes, sem gate de `pidof` | **todos morreram e a sessão não caiu** — encerra a linha do force-stop |
 
-**A central é cliente STA, não AP.** Nos 10 eventos, `wlan2` tem IP por DHCP em
-`192.168.33.0/24` com host diferente a cada sessão (.17 .40 .42 .82 .137 .163 .191 .199
-.239 .245), e `mSoftApTetheredEvents:`/`mSoftApLocalOnlyEvents:` vêm **vazios**. Não
-existe softAP local — o `mApInterfaceName: wlan2` do dump é config residual do
-`SoftApManager`. Quem cria o hotspot é o **celular**. Isso fecha a questão de por que
-`svc wifi disable` derruba e matar processo não: a sessão vive no link STA do `wlan2`.
+**A central é cliente STA, não AP.** A `wlan2` pega IP por DHCP em `192.168.33.0/24`,
+host diferente a cada sessão, e `mSoftApTetheredEvents:`/`mSoftApLocalOnlyEvents:` vêm
+**vazios** — não existe softAP local (o `mApInterfaceName: wlan2` do dump é config
+residual do `SoftApManager`). Quem cria o hotspot é o **celular**.
 
-**`pidof <pacote>` não serve aqui** — ele casa por *nome de processo*. Os processos vivos
-em toda tranca são `com.ts.carplay`, `com.ts.androidauto`, `com.ts.carplay.app` e
-`com.ts.androidauto.app`; `com.ts.androidauto` **não é pacote instalado** (não sai no
-`pm list packages` do próprio log), é nome de processo de outro pacote. A prova de que a
-linha da v1.6.0 era artefato de medição está no evento de 06/09 13:10:55: o
-`dumpsys activity services` trouxe
-`ServiceRecord{... com.ts.androidauto.projectionservice/.AndroidAutoService}` **ativo** no
-mesmo instante em que o log dizia "nao estava rodando". E como `stopAndroidAuto()` faz
-`continue` quando o `pidof` vem vazio, esse pacote **nunca foi force-stopado de verdade**.
+**Nenhum processo da central sustenta a sessão** (medido 09/09/2026):
 
-Ainda: `com.ts.carplay.app/.service.CarPlayRemoteService` é o serviço de projeção
-**compartilhado** — `com.ts.androidauto` e `com.ts.carplay` aparecem como `AppBindRecord`
-clientes dele em todas as trancas, e nenhum dos dois estava na lista de kill.
+```
+MORTOS: 3546/com.ts.carplay 3754/com.ts.carplay.app 3785/com.ts.androidauto.app 3818/com.ts.androidauto
+SOBREVIVERAM: (nenhum)
+RESULTADO: wlan2 seguiu com 192.168.33.52 -> matar processo NAO derruba a sessao
+```
 
-### v1.8.0 — dois testes manuais, um botão cada
+**Só o `ndc` derruba o link**, e os outros dois caminhos mentem:
 
-`utils/ProjectionProbe.kt`, no botão **Teste AAW** do cabeçalho. Testes à mão e não um
-quarto palpite no gatilho: são duas hipóteses concorrentes e só o carro decide qual vale.
+```
+[ip link set wlan2 down]            ok | ip agora=192.168.33.52
+[ifconfig wlan2 down]               ok | ip agora=192.168.33.52
+[ndc interface setcfg wlan2 down]   ok | ip agora=(nenhum) -> CAIU
+```
 
-- **Derrubar wlan2** — escada de `ip link set wlan2 down` → `ifconfig wlan2 down` →
-  `ndc interface setcfg wlan2 down`, parando no primeiro que faz a interface perder o
-  IPv4. Nenhum é garantido com uid de shell (`CAP_NET_ADMIN`), e é por isso que é uma
-  escada com o resultado de cada degrau no log. Se algum funcionar, o Wi-Fi de casa
-  (`wlan0`) fica de pé — que é o que o `svc wifi disable` levava junto.
-- **Force-stop projeção** — os 8 pacotes, **sem gate de `pidof`**, CarPlay incluído. O
-  diff de pids entre antes e depois dá a evidência causal sem depender do mapeamento
-  processo↔pacote; um `dumpsys activity processes` no relatório resolve de quem é o
-  processo `com.ts.androidauto`.
+Exit 0 sem efeito nos dois primeiros — o mesmo `true` mentiroso do
+`BluetoothAdapter.disable()`. Por isso `AawLink.setUp()` **confere o estado depois** em
+vez de acreditar no exit code.
 
-O que decide em ambos não é o comando ter rodado, é o `wlan2` perder o IPv4 — por isso os
-dois fotografam a interface antes, depois e 5 s depois. O relatório aparece no diálogo e
-vai para o `PersistentLog`, então sai no próximo **Log → Enviar**.
+**`pidof <pacote>` não serve** para saber se um pacote de projeção roda: casa por *nome
+de processo*. `app=ProcessRecord{... 3818:com.ts.androidauto/1000}` no `ServiceRecord` do
+`com.ts.androidauto.projectionservice` prova que o processo dele se chama
+`com.ts.androidauto`, que não é pacote instalado. Use `ps` — é o que
+`AawLink.projectionProcesses()` faz.
+
+### v1.9.0 — o pisca dos rádios
+
+Substituiu o force-stop como ação principal da funcionalidade 2. Ao trancar: derruba
+`wlan2` e Bluetooth, espera 10 s, religa **na mesma ordem**.
+
+Por que piscar e não desligar — os dois lados do requisito:
+
+- **desligar imediato**: a sessão cai no instante da tranca, que é o que o force-stop
+  nunca conseguiu;
+- **ligar rápido**: os rádios voltam quentes. O caminho antigo (toggles invasivos) deixa
+  tudo desligado e paga na ignição — `07:18:26.886 Bluetooth religado`,
+  `07:18:28.037 Wi-Fi religado`, mais `Bluetooth nao ligou pelo svc — tentando pelo
+  BluetoothAdapter`.
+
+E o estado misto é o pior de todos, medido: com `wlan2` caída e Bluetooth ligado, o AA
+não funciona **e** o áudio do telefone fica preso no carro.
+
+Quatro proteções, cada uma por um motivo observado:
+
+| Proteção | Por quê |
+|---|---|
+| `bounceInProgress` guarda a janela | a ROM religou o Bluetooth 3× em ~3 s no log de 08/09; sem guarda a janela é engolida. Limpo **antes** de religar, senão a guarda reverte a própria restauração |
+| `BOUNCE_PENDING` em disco + `recoverFromInterruptedBounce()` | a janela de 10 s é justo quando a ROM mata o processo (24 criações × 2 destruições no log de 08/09). Sem isso a central acorda com os rádios desligados e ninguém para religar |
+| `ensureAawInterfaceUp()` na ignição | cobre a interface ficar caída por fora do pisca — o teste manual "Derrubar wlan2" não a levanta de volta |
+| ciclo completo de `svc wifi` se o `ndc up` não pegar | com a `wlan2` caída o AA não funciona; custa segundos e leva o Wi-Fi de casa, mas o alternativo é AAW quebrado até o boot |
+
+Destrancar dentro da janela cancela e religa na hora — o motorista voltou.
+
+Quando o pisca está ligado, ele **manda** nos rádios na tranca e os dois toggles
+invasivos ficam ignorados (com linha no log). Sem essa regra os dois modos brigam: o
+pisca religa por projeto e a guarda de `radiosOffByLock` reverteria o religamento.
+
+**A pergunta aberta** é uma só: com os rádios de volta, o telefone reconecta o AA
+sozinho? Se reconectar, a sessão volta a projetar num carro vazio e o pisca não resolve.
+`scheduleBounceVerification()` registra `wlan2`, processos de projeção e o aparelho
+Bluetooth conectado em 15 s, 30 s e 60 s — um ciclo de teste responde.
+
+### Testes manuais — botão Teste AAW
+
+`utils/ProjectionProbe.kt`, dois botões separados. Os dois já responderam (acima); ficam
+como instrumento para medir de novo se a ROM ou o telefone mudarem.
+
+**Cuidado:** "Derrubar wlan2" derruba e **não levanta de volta**. Quem restaura é o pisca
+do serviço ou o `ensureAawInterfaceUp()` da ignição.
 
 O receiver está medido como `com.ts.androidauto.app/.display.AapActivity` (app de
 sistema VENDOR, Android 9) — ver a memória `central-haval-fatos`. A ROM tem **oito**

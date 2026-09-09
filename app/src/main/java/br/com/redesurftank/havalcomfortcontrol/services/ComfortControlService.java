@@ -39,6 +39,7 @@ import br.com.redesurftank.havalcomfortcontrol.CarProps;
 import br.com.redesurftank.havalcomfortcontrol.ComfortStateHolder;
 import br.com.redesurftank.havalcomfortcontrol.Prefs;
 import br.com.redesurftank.havalcomfortcontrol.broadcastReceivers.RestartReceiver;
+import br.com.redesurftank.havalcomfortcontrol.utils.AawLink;
 import br.com.redesurftank.havalcomfortcontrol.utils.IPTablesUtils;
 import br.com.redesurftank.havalcomfortcontrol.utils.PersistentLog;
 import br.com.redesurftank.havalcomfortcontrol.utils.ShizukuUtils;
@@ -83,31 +84,47 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      */
     private static final String ANDROID_AUTO_PACKAGE = "com.ts.androidauto.app";
     /**
-     * Pacotes de Android Auto da central que encerramos ao trancar.
+     * Janela em que a interface do AAW e o Bluetooth ficam desligados na tranca.
      *
-     * ATENCAO ao historico antes de mexer aqui — tres palpites meus falharam em campo:
+     * POR QUE PISCAR E NAO DESLIGAR — quatro palpites de force-stop morreram antes
+     * disto:
      *
      * 1. com.google.android.projection.gearhead (v1.2.0): e o app do CELULAR, nem
      *    existe na central. O force-stop falhava em silencio.
-     * 2. com.ts.androidauto.app (v1.5.0): existe e morre — o log confirma
-     *    `pid N -> encerrado` — e o telefone SEGUE conectado. E so a parte de tela
-     *    (.display.AapActivity).
-     * 3. com.ts.androidauto.projectionservice (v1.6.0): o pacote existe, mas em
-     *    tres eventos de tranca ele NUNCA teve processo — "nao estava rodando".
+     * 2. com.ts.androidauto.app (v1.5.0): existe e morre, e o telefone SEGUE conectado.
+     *    E so a parte de tela (.display.AapActivity).
+     * 3. com.ts.androidauto.projectionservice (v1.6.0): o log dizia "nao estava
+     *    rodando", mas era artefato do `pidof`, que casa por NOME DE PROCESSO — o
+     *    processo dele se chama com.ts.androidauto.
+     * 4. Os OITO pacotes de projecao, sem gate de pidof (v1.8.0, medido em 09/09/2026):
+     *    os quatro processos vivos morreram, nenhum voltou em 5 s, e a wlan2 seguiu com
+     *    IP e o vizinho REACHABLE. Nenhum processo da central sustenta a sessao.
      *
-     * Ou seja: quem sustenta a sessao do AAW nao e nenhum destes, e a hipotese do
-     * LocalOnlyHotspot amarrado ao app esta desmentida. Por isso a v1.7.0 nao adiciona
-     * um quarto palpite: adiciona dumpProjectionDiagnostics(), que coleta os fatos.
+     * O que funciona e derrubar o link: `ndc interface setcfg wlan2 down` — ver
+     * {@link AawLink}. So que derrubar e DEIXAR derrubado custa a partida seguinte: o
+     * log de 09/09 mostra ~2 s religando os radios na ignicao (07:18:26.886 Bluetooth,
+     * 07:18:28.037 Wi-Fi) mais o fallback do BluetoothAdapter. E, medido pior: com a
+     * wlan2 caida e o Bluetooth ligado, o AA nao funciona e o audio do telefone fica
+     * preso no carro.
      *
-     * A lista fica porque encerrar e barato e correto de qualquer forma; ela so nao e
-     * suficiente. CarPlay fica de fora: nao serve um telefone Android.
+     * Piscar resolve os dois lados: a sessao cai na tranca e os radios voltam quentes
+     * para a proxima partida. 10 s e o valor a calibrar — curto demais o telefone talvez
+     * nao note, longo demais aumenta a janela em que a ROM pode nos matar no meio.
      */
-    private static final String[] ANDROID_AUTO_PACKAGES = {
-            "com.ts.androidauto.projectionservice",
-            "com.ts.androidauto.app",
-            "com.autolink.androidauto.projectionservice",
-            "com.autolink.androidauto.app",
-    };
+    private static final long BOUNCE_OFF_MS = 10_000;
+    /**
+     * Meio da janela: a ROM pode levantar a interface de volta sozinha. Se levantou,
+     * derrubamos de novo — e o log registra que isso aconteceu.
+     */
+    private static final long BOUNCE_MIDCHECK_MS = 5_000;
+    /**
+     * Conferencias depois de religar. Existem para responder a UNICA pergunta que o
+     * pisca deixa em aberto: com os radios de volta, o telefone reconecta o AA sozinho?
+     * Se reconectar, a sessao volta a projetar num carro vazio e o pisca nao serve.
+     */
+    private static final long[] BOUNCE_VERIFY_DELAYS_MS = {15_000, 30_000, 60_000};
+    /** Espera entre o disable e o enable no fallback de ciclo completo de Wi-Fi. */
+    private static final long WIFI_CYCLE_GAP_MS = 2_000;
     /** Pistas para descobrir no log um receiver diferente destes, se houver. */
     private static final String[] PROJECTION_HINTS = {
             "androidauto", "gearhead", "carlife", "carplay", "hicar", "zlink", "easyconn"
@@ -140,14 +157,6 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      */
     private static final long LOCK_RECHECK_DELAY_MS = 3_000;
     private static final int  LOCK_RECHECK_MAX      = 4;
-    /**
-     * Quando reconferir se algum processo de Android Auto voltou depois do force-stop.
-     *
-     * A conferencia imediata (milissegundos) so prova que o `am` matou o processo — nao
-     * que ele ficou morto. Se a ROM reinicia o app de sistema em seguida, a sessao
-     * volta e o log anterior diria "encerrado" sem mentir e sem ajudar.
-     */
-    private static final long[] AA_RECHECK_DELAYS_MS = {10_000, 30_000};
 
     private static Method getServiceMethod;
 
@@ -211,6 +220,16 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * voltou, nem com o carro apenas desligado sem ninguem ter saido.
      */
     private boolean radiosOffByLock = false;
+    /**
+     * Estamos dentro da janela de {@link #BOUNCE_OFF_MS} do pisca.
+     *
+     * Serve para a MESMA guarda de radioGuardReceiver: o log de 08/09 mostra a ROM
+     * religando o Bluetooth tres vezes em ~3 s depois de desligarmos, e sem guarda a
+     * janela do pisca seria engolida. A diferenca em relacao a radiosOffByLock e que
+     * este flag e limpo ANTES de religarmos, senao a guarda reverteria a nossa propria
+     * restauracao.
+     */
+    private boolean bounceInProgress = false;
     /** Reavaliacoes restantes da tranca; ver LOCK_RECHECK_DELAY_MS. */
     private int lockRechecksLeft = 0;
 
@@ -218,6 +237,13 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private BroadcastReceiver radioGuardReceiver;
 
     private final Runnable uiPushRunnable = this::pushUiState;
+    /**
+     * Em campo, e nao `this::bounceRestore` inline: cada referencia de metodo cria um
+     * objeto novo, e o removeCallbacks do cancelamento antecipado nao casaria com o que
+     * foi enfileirado.
+     */
+    private final Runnable bounceRestoreRunnable  = this::bounceRestore;
+    private final Runnable bounceMidCheckRunnable = this::bounceMidCheck;
 
     /**
      * Chaves que disparam acao. vehicle_speed, gear_status e engine_state ficam DE
@@ -409,17 +435,12 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                     + " wifi=" + (isWifiOn() ? "on" : "off")
                     + " receiverAA=" + (isPackageInstalled(ANDROID_AUTO_PACKAGE)
                                         ? "instalado" : "NAO INSTALADO"));
-            // Quem esta VIVO agora, entre os pacotes de AA — a resposta que faltava
-            // para saber quem sustenta a sessao.
-            react.post(() -> {
-                StringBuilder vivos = new StringBuilder();
-                for (String pkg : ANDROID_AUTO_PACKAGES) {
-                    String pid = pidof(pkg);
-                    if (!pid.isEmpty()) vivos.append(pkg).append('(').append(pid).append(") ");
-                }
-                PersistentLog.w(TAG, "processos de AA vivos no arranque: "
-                        + (vivos.length() == 0 ? "(nenhum)" : vivos.toString().trim()));
-            });
+            // Estado da projecao no arranque. Via `ps` (AawLink), nunca `pidof`: ele casa
+            // por nome de processo, e foi o que fez a v1.6.0 concluir que o
+            // projectionservice "nunca tinha processo" quando ele estava ativo.
+            react.post(() -> PersistentLog.w(TAG, "projecao no arranque: "
+                    + AawLink.projectionProcessesLine()
+                    + " | " + AawLink.IFACE + " " + AawLink.describe()));
             react.post(this::logProjectionPackages);
             PersistentLog.w(TAG, "conectado ao veiculo — ready="
                     + dataCache.get(CarProps.DRIVING_READY)
@@ -451,6 +472,10 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private void applyStateOnStartup() {
         boolean isReady = isReady(dataCache.get(CarProps.DRIVING_READY));
         lastReady = isReady;
+
+        // Antes de qualquer outra coisa, e independente de o carro estar ligado: se a ROM
+        // nos matou no meio de um pisca, os radios estao desligados e ninguem sabe disso.
+        recoverFromInterruptedBounce();
 
         if (prefs.getBoolean(Prefs.KEEP_DISTRACTION_DISABLED, Prefs.DEF_KEEP_DISTRACTION_DISABLED)
                 && "1".equals(dataCache.get(CarProps.DISTRACTION))) {
@@ -511,6 +536,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             applyStartupVolumeIfPending();
             restoreBluetoothIfPending();
             restoreWifiIfPending();
+            ensureAawInterfaceUp();
         } else {
             PersistentLog.w(TAG, "veiculo desligado (driving_ready=" + value + ")");
             applyPowerOff();
@@ -538,6 +564,14 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             // Destrancou: libera para agir na proxima trancada e para de reverter os
             // radios, senao a guarda brigaria com o usuario que acabou de voltar.
             if (lockActionDone || radiosOffByLock) log("carro destrancado");
+            // Destrancou dentro da janela do pisca: o motorista voltou, e faze-lo esperar
+            // o resto dos 10 s por Bluetooth e Wi-Fi seria o contrario do objetivo.
+            if (bounceInProgress) {
+                react.removeCallbacks(bounceMidCheckRunnable);
+                react.removeCallbacks(bounceRestoreRunnable);
+                log("destrancou dentro da janela do pisca — religando agora");
+                bounceRestore();
+            }
             lockActionDone   = false;
             radiosOffByLock  = false;
             lockRechecksLeft = 0;
@@ -620,13 +654,20 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * desligar radio e ultimo recurso (default OFF).
      */
     private void applyRadiosOff() {
-        boolean acted = false;
-        if (prefs.getBoolean(Prefs.STOP_ANDROID_AUTO_ON_LOCK, Prefs.DEF_STOP_ANDROID_AUTO)) {
-            dumpProjectionDiagnostics("antes do force-stop");
-            if (stopAndroidAuto()) log("Android Auto encerrado");
-            else log("nenhum processo de Android Auto estava rodando para encerrar");
-            scheduleAaRechecks();
+        if (prefs.getBoolean(Prefs.BOUNCE_RADIOS_ON_LOCK, Prefs.DEF_BOUNCE_RADIOS)) {
+            dumpProjectionDiagnostics("antes do pisca");
+            bounceRadios();
+            // O pisca MANDA nos radios nesta tranca. Deixar os toggles invasivos rodarem
+            // junto poria os dois modos a brigar: o pisca religa por projeto, e a guarda
+            // de radiosOffByLock reverteria esse religamento na hora.
+            if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
+                    || prefs.getBoolean(Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
+                log("pisca ativo — os desligamentos permanentes de radio ficam ignorados");
+            }
+            pushUiState();
+            return;
         }
+        boolean acted = false;
         if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
                 && isBluetoothOn()) {
             prefs.edit().putBoolean(Prefs.BT_RESTORE_PENDING, true).apply();
@@ -686,7 +727,14 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                             BluetoothAdapter.ERROR);
                     if (state != BluetoothAdapter.STATE_ON) return;
                     react.post(() -> {
-                        if (radiosOffByLock && prefs.getBoolean(
+                        // Duas guardas distintas: bounceInProgress protege a janela de 10 s
+                        // do pisca (a ROM religou o Bluetooth 3x em ~3s no log de 08/09), e
+                        // radiosOffByLock protege o desligamento permanente do toggle
+                        // invasivo. A do pisca nao consulta pref: quem decidiu foi o pisca.
+                        if (bounceInProgress) {
+                            setBluetoothEnabled(false);
+                            log("pisca: Bluetooth religou na janela, desligado de novo");
+                        } else if (radiosOffByLock && prefs.getBoolean(
                                 Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)) {
                             setBluetoothEnabled(false);
                             log("Bluetooth religou com o carro trancado, desligado de novo");
@@ -864,54 +912,159 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     /**
-     * Encerra o receiver de Android Auto da central. Acao PRINCIPAL da funcionalidade 2.
+     * O "pisca" dos radios — acao PRINCIPAL da funcionalidade 2.
      *
-     * Matar o receiver basta porque o AP do Android Auto sem fio e um
-     * LocalOnlyHotspot: o framework amarra o tempo de vida dele ao app que o pediu,
-     * entao o AP cai junto, sozinho. Nada de radio precisa ser desligado — nem o Wi-Fi
-     * cliente da central, nem o Bluetooth.
+     * Derruba a interface do AAW e o Bluetooth por {@link #BOUNCE_OFF_MS} e religa os
+     * dois na MESMA ordem. O objetivo e duplo, e e o que distingue isto do desligamento
+     * permanente dos toggles invasivos: a sessao do Android Auto cai no instante da
+     * tranca, e os radios voltam quentes para que a partida seguinte nao pague o custo
+     * de religar (~2 s medidos no log de 09/09, mais o fallback do BluetoothAdapter).
+     *
+     * A ordem — interface primeiro, Bluetooth depois — nao e arbitraria: o link e o que
+     * sustenta a sessao de projecao, e o Bluetooth e o que mantem o audio do telefone
+     * preso no carro. No teste de 09/09 a wlan2 ficou caida com o Bluetooth ligado, e o
+     * resultado foi o pior dos dois mundos: AA sem funcionar E audio capturado.
+     *
+     * Roda inteiro na thread react, com postDelayed em vez de sleep — a thread precisa
+     * seguir atendendo onDataChanged durante os 10 s.
      */
-    private boolean stopAndroidAuto() {
-        boolean matouAlgum = false;
-        for (String pkg : ANDROID_AUTO_PACKAGES) {
-            // O pid ANTES importa: sem ele, "processo morto" nao distingue "matamos"
-            // de "nunca estava rodando" — foi a ambiguidade que fez o log de 04/09
-            // dizer "encerrado" enquanto a sessao seguia viva no projectionservice.
-            String antes = pidof(pkg);
-            if (antes.isEmpty()) {
-                PersistentLog.w(TAG, "AA " + pkg + ": nao estava rodando");
-                continue;
-            }
-            ShizukuUtils.ShellResult r = ShizukuUtils.run(
-                    new String[]{"am", "force-stop", pkg});
-            String depois = pidof(pkg);
-            boolean morreu = depois.isEmpty();
-            PersistentLog.w(TAG, "AA " + pkg + ": pid " + antes
-                    + (morreu ? " -> encerrado" : " -> AINDA VIVO (" + depois + ")")
-                    + " | am: " + r.describeFailure());
-            if (morreu) matouAlgum = true;
-        }
-        return matouAlgum;
+    private void bounceRadios() {
+        boolean btWasOn   = isBluetoothOn();
+        boolean wifiWasOn = isWifiOn();
+        // Persistido ANTES de tocar em radio: a janela de 10 s e exatamente quando a ROM
+        // costuma matar este processo (24 criacoes contra 2 destruicoes no log de 08/09),
+        // e a rede de seguranca do arranque depende desta flag ja estar em disco.
+        prefs.edit()
+                .putBoolean(Prefs.BOUNCE_PENDING, true)
+                .putBoolean(Prefs.BOUNCE_BT_WAS_ON, btWasOn)
+                .putBoolean(Prefs.BOUNCE_WIFI_WAS_ON, wifiWasOn)
+                .apply();
+        bounceInProgress = true;
+
+        log("pisca: derrubando " + AawLink.IFACE + " e Bluetooth por "
+                + (BOUNCE_OFF_MS / 1000) + "s");
+        AawLink.setUp(false);
+        if (btWasOn) setBluetoothEnabled(false);
+        else log("pisca: Bluetooth ja estava desligado");
+
+        react.postDelayed(bounceMidCheckRunnable, BOUNCE_MIDCHECK_MS);
+        react.postDelayed(bounceRestoreRunnable,  BOUNCE_OFF_MS);
     }
 
-    private String pidof(String pkg) {
-        return ShizukuUtils.run(new String[]{"pidof", pkg}).stdout.trim();
+    /**
+     * Metade da janela: se a interface reassociou sozinha, a sessao voltou e o pisca
+     * teria sido inofensivo. Derruba de novo e deixa isso registrado — se aparecer no
+     * log, a janela precisa de uma guarda de verdade e nao de uma conferencia.
+     */
+    private void bounceMidCheck() {
+        if (!bounceInProgress) return;
+        if (AawLink.ipv4() == null) return;
+        log("pisca: " + AawLink.IFACE + " reassociou no meio da janela — derrubando de novo");
+        AawLink.setUp(false);
     }
 
-    /** Agenda conferencias tardias: o processo morreu, mas ficou morto? */
-    private void scheduleAaRechecks() {
-        for (long delay : AA_RECHECK_DELAYS_MS) {
-            react.postDelayed(() -> {
-                StringBuilder vivos = new StringBuilder();
-                for (String pkg : ANDROID_AUTO_PACKAGES) {
-                    String pid = pidof(pkg);
-                    if (!pid.isEmpty()) vivos.append(pkg).append('(').append(pid).append(") ");
-                }
-                PersistentLog.w(TAG, "AA " + (delay / 1000) + "s depois: "
-                        + (vivos.length() == 0 ? "segue tudo encerrado"
-                                               : "VOLTOU -> " + vivos.toString().trim()));
-            }, delay);
+    private void bounceRestore() {
+        boolean btWasOn   = prefs.getBoolean(Prefs.BOUNCE_BT_WAS_ON, false);
+        boolean wifiWasOn = prefs.getBoolean(Prefs.BOUNCE_WIFI_WAS_ON, false);
+        // Limpo ANTES de religar: com o flag de pe, radioGuardReceiver reverteria a
+        // nossa propria restauracao do Bluetooth.
+        bounceInProgress = false;
+        restoreRadiosAfterBounce(btWasOn, wifiWasOn, "pisca");
+        scheduleBounceVerification();
+    }
+
+    /**
+     * Religa o que o pisca desligou. Compartilhado com a recuperacao do arranque, para
+     * que os dois caminhos religuem exatamente igual.
+     */
+    private void restoreRadiosAfterBounce(boolean btWasOn, boolean wifiWasOn, String origem) {
+        boolean subiu = AawLink.setUp(true);
+        if (!subiu && wifiWasOn) {
+            // Medido em 09/09: com a wlan2 caida o AA simplesmente nao funciona. Se o
+            // `ndc up` nao recupera a interface, o ciclo completo de Wi-Fi a reconstroi.
+            // Custa segundos e derruba o Wi-Fi de casa junto — mas a alternativa e o AAW
+            // quebrado ate o proximo boot, que foi o estado em que o teste deixou a
+            // central.
+            log(origem + ": " + AawLink.IFACE
+                    + " nao subiu pelo ndc — ciclo completo de Wi-Fi como ultimo recurso");
+            setWifiEnabled(false);
+            react.postDelayed(() -> setWifiEnabled(true), WIFI_CYCLE_GAP_MS);
         }
+        if (btWasOn) setBluetoothEnabled(true);
+        log(origem + ": religado (" + AawLink.IFACE + "=" + (subiu ? "up" : "AINDA DOWN")
+                + ", bluetooth=" + (btWasOn ? "religado" : "seguiu desligado") + ")");
+        prefs.edit().putBoolean(Prefs.BOUNCE_PENDING, false).apply();
+        pushUiState();
+    }
+
+    /**
+     * A unica pergunta que o pisca deixa em aberto: com os radios de volta, o telefone
+     * reconecta o Android Auto sozinho?
+     *
+     * Se reconectar, a sessao volta a projetar num carro vazio e o pisca nao resolve o
+     * problema — seria preciso segurar os radios desligados ate a proxima ignicao, ao
+     * custo da partida lenta. Se nao reconectar, o AAW so re-inicia num gatilho de
+     * ignicao e o pisca e exatamente a resposta certa. So o carro decide, e estas tres
+     * linhas no log e que vao dizer qual dos dois e.
+     */
+    private void scheduleBounceVerification() {
+        for (long delay : BOUNCE_VERIFY_DELAYS_MS) {
+            react.postDelayed(() -> PersistentLog.w(TAG,
+                    "pisca " + (delay / 1000) + "s depois: " + AawLink.describe()
+                            + " | projecao=" + AawLink.projectionProcessesLine()
+                            + " | bt=" + (isBluetoothOn() ? "on" : "off")
+                            + " " + AawLink.bluetoothConnectedLine()), delay);
+        }
+    }
+
+    /**
+     * Garante que a interface do AAW esta de pe quando o carro liga.
+     *
+     * A rede de seguranca do arranque cobre a central acordando com o pisca
+     * interrompido; esta cobre o resto — a interface ficar caida por qualquer motivo que
+     * nao passou por nos (o teste manual do "Derrubar wlan2", por exemplo, que nao
+     * levanta de volta). O requisito e "ao ligar o carro, conexao o mais rapido
+     * possivel", e comecar a viagem com a interface DOWN e o oposto disso.
+     *
+     * Barato: um `ip link show` e, so se estiver caida, um `ndc`.
+     */
+    private void ensureAawInterfaceUp() {
+        if (!AawLink.isDown()) return;
+        log(AawLink.IFACE + " estava DOWN na partida — levantando");
+        AawLink.setUp(true);
+    }
+
+    /**
+     * Rede de seguranca do arranque.
+     *
+     * Se a ROM matou o processo dentro da janela do pisca, a central acorda com a
+     * interface caida e o Bluetooth desligado, e ninguem para religar. Nao e hipotese:
+     * e literalmente o estado em que o teste de 09/09 deixou a central — AA sem
+     * funcionar e, por o Bluetooth ter ficado conectado, o audio do telefone preso no
+     * carro.
+     *
+     * Roda em todo arranque do servico, com o carro ligado ou nao, porque a flag em
+     * storage device-protected sobrevive a boot frio e e lida antes do unlock.
+     */
+    private void recoverFromInterruptedBounce() {
+        if (!prefs.getBoolean(Prefs.BOUNCE_PENDING, false)) return;
+        boolean btWasOn   = prefs.getBoolean(Prefs.BOUNCE_BT_WAS_ON, false);
+        boolean wifiWasOn = prefs.getBoolean(Prefs.BOUNCE_WIFI_WAS_ON, false);
+        boolean precisaIface = AawLink.isDown();
+        boolean precisaBt    = btWasOn && !isBluetoothOn();
+
+        if (!precisaIface && !precisaBt) {
+            // Ja normalizou sozinho. A flag e consumida de qualquer forma: deixa-la de
+            // pe faria um desligamento manual de radio muito depois ser "restaurado" num
+            // arranque futuro — o mesmo cuidado que restoreBluetoothIfPending() toma.
+            prefs.edit().putBoolean(Prefs.BOUNCE_PENDING, false).apply();
+            log("pisca interrompido, mas os radios ja estavam normais — flag limpa");
+            return;
+        }
+        log("pisca interrompido detectado no arranque (" + AawLink.IFACE
+                + (precisaIface ? "=DOWN" : "=up")
+                + ", bluetooth=" + (isBluetoothOn() ? "on" : "off") + ")");
+        restoreRadiosAfterBounce(btWasOn, wifiWasOn, "recuperacao do arranque");
     }
 
     /**

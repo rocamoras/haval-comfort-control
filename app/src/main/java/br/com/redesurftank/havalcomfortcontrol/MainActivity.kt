@@ -114,9 +114,9 @@ private fun ComfortScreen() {
         mutableStateOf(prefs.getBoolean(
             Prefs.CLOSE_WINDOWS_ON_LOCK, Prefs.DEF_CLOSE_WINDOWS_ON_LOCK))
     }
-    var stopAndroidAuto by remember {
+    var bounceRadios by remember {
         mutableStateOf(prefs.getBoolean(
-            Prefs.STOP_ANDROID_AUTO_ON_LOCK, Prefs.DEF_STOP_ANDROID_AUTO))
+            Prefs.BOUNCE_RADIOS_ON_LOCK, Prefs.DEF_BOUNCE_RADIOS))
     }
     var disableBluetooth by remember {
         mutableStateOf(prefs.getBoolean(
@@ -161,11 +161,10 @@ private fun ComfortScreen() {
     var uploadStatus  by remember { mutableStateOf("") }
     var uploadUrl     by remember { mutableStateOf("") }
 
-    // Testes de campo do Android Auto sem fio. São duas hipóteses concorrentes tiradas
-    // do log da v1.7.0 e cada uma tem seu botão: derrubar só a wlan2 (a central é
-    // cliente STA do hotspot do celular) e force-stop incondicional dos pacotes de
-    // projeção (o `pidof` mentia e o projectionservice nunca foi realmente encerrado).
-    // Ver ProjectionProbe para a evidência de cada uma.
+    // Testes de campo do Android Auto sem fio. Os dois já responderam (09/09): matar
+    // processo não derruba a sessão, e só o `ndc` derruba a interface. Ficam como
+    // instrumento — ver ProjectionProbe para os números. Atenção: "Derrubar wlan2" não
+    // levanta a interface de volta; quem restaura é o pisca do serviço.
     var showProbeDialog by remember { mutableStateOf(false) }
     var probeReport     by remember { mutableStateOf("") }
     var probeRunning    by remember { mutableStateOf("") }
@@ -435,20 +434,21 @@ private fun ComfortScreen() {
             FeatureCard(
                 modifier = Modifier.weight(1f),
                 title = "Desconectar ao trancar",
-                description = "Ao trancar o carro, encerra o receiver do Android Auto "
-                        + "na central — isso derruba a sessão e o Wi-Fi do AA sem fio "
-                        + "junto, sem mexer nos rádios. Desligar Bluetooth e Wi-Fi é "
-                        + "último recurso, só se a sessão insistir.",
+                description = "Ao trancar o carro, pisca a interface do Android Auto sem "
+                        + "fio e o Bluetooth por 10 s e religa em seguida: a sessão cai na "
+                        + "hora e os rádios voltam quentes, para a próxima partida não "
+                        + "pagar o custo de religar. Enquanto o pisca está ligado, os dois "
+                        + "toggles abaixo ficam ignorados.",
                 toggles = listOf(
-                    Toggle("Encerrar Android Auto", stopAndroidAuto) {
-                        stopAndroidAuto = it
-                        prefs.edit().putBoolean(Prefs.STOP_ANDROID_AUTO_ON_LOCK, it).apply()
+                    Toggle("Piscar rádios (10 s)", bounceRadios) {
+                        bounceRadios = it
+                        prefs.edit().putBoolean(Prefs.BOUNCE_RADIOS_ON_LOCK, it).apply()
                     },
-                    Toggle("Bluetooth (invasivo)", disableBluetooth) {
+                    Toggle("Bluetooth desligado (invasivo)", disableBluetooth) {
                         disableBluetooth = it
                         prefs.edit().putBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, it).apply()
                     },
-                    Toggle("Wi-Fi da central (invasivo)", disableWifi) {
+                    Toggle("Wi-Fi desligado (invasivo)", disableWifi) {
                         disableWifi = it
                         prefs.edit().putBoolean(Prefs.DISABLE_WIFI_ON_LOCK, it).apply()
                     },
