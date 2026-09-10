@@ -83,8 +83,9 @@ seria churn constante para cobrir uma corrida de segundos.
 Dois flags de estado governam o ciclo:
 - `lockActionDone` — a ROM repete `door_lock_status=1`; sem isso cada repetição
   refaria tudo. Zera ao destrancar e na partida.
-- `radiosOffByLock` — só enquanto true a guarda reverte um religamento de
-  Bluetooth/Wi-Fi. Impede de brigar com o usuário que destrancou e voltou.
+- `bounceInProgress` — a janela do pisca está aberta, e a guarda reverte qualquer
+  religamento de Bluetooth dentro dela. Limpo **antes** de religarmos, senão a guarda
+  reverteria a própria restauração.
 
 ## Android Auto sem fio (funcionalidade 2)
 
@@ -133,37 +134,44 @@ de processo*. `app=ProcessRecord{... 3818:com.ts.androidauto/1000}` no `ServiceR
 `com.ts.androidauto`, que não é pacote instalado. Use `ps` — é o que
 `AawLink.projectionProcesses()` faz.
 
-### v1.9.0 — o pisca dos rádios
+### O pisca dos rádios — o único modo (v1.9.0, calibrado na v1.10.0)
 
-Substituiu o force-stop como ação principal da funcionalidade 2. Ao trancar: derruba
-`wlan2` e Bluetooth, espera 10 s, religa **na mesma ordem**.
+Ação da funcionalidade 2, no toggle **Desativar**. Ao trancar: derruba `wlan2` e
+Bluetooth, espera **1 minuto**, religa **na mesma ordem**.
+
+A v1.10.0 mudou a janela de 10 s para 1 minuto (10 s derrubavam a sessão, mas eram
+curtos demais para o telefone desistir dela) e **removeu os dois modos alternativos**,
+"Bluetooth (invasivo)" e "Wi-Fi (invasivo)", que desligavam o rádio inteiro e só
+religavam na ignição. O pisca faz o mesmo serviço sem deixar a central sem internet nem
+viva-voz com o carro trancado, e sem pagar o religamento na partida — e manter os três
+era manter dois modos que brigam entre si. Saíram com eles `radiosOffByLock`,
+`restoreBluetoothIfPending()`, `restoreWifiIfPending()`, `BT_RESTORE_PENDING`,
+`WIFI_RESTORE_PENDING` e o ramo de Wi-Fi da guarda de rádios.
 
 Por que piscar e não desligar — os dois lados do requisito:
 
 - **desligar imediato**: a sessão cai no instante da tranca, que é o que o force-stop
   nunca conseguiu;
-- **ligar rápido**: os rádios voltam quentes. O caminho antigo (toggles invasivos) deixa
-  tudo desligado e paga na ignição — `07:18:26.886 Bluetooth religado`,
+- **ligar rápido**: os rádios voltam quentes. O caminho antigo (toggles invasivos) deixava
+  tudo desligado e pagava na ignição — `07:18:26.886 Bluetooth religado`,
   `07:18:28.037 Wi-Fi religado`, mais `Bluetooth nao ligou pelo svc — tentando pelo
   BluetoothAdapter`.
 
 E o estado misto é o pior de todos, medido: com `wlan2` caída e Bluetooth ligado, o AA
 não funciona **e** o áudio do telefone fica preso no carro.
 
-Quatro proteções, cada uma por um motivo observado:
+Cinco proteções, cada uma por um motivo observado:
 
 | Proteção | Por quê |
 |---|---|
-| `bounceInProgress` guarda a janela | a ROM religou o Bluetooth 3× em ~3 s no log de 08/09; sem guarda a janela é engolida. Limpo **antes** de religar, senão a guarda reverte a própria restauração |
-| `BOUNCE_PENDING` em disco + `recoverFromInterruptedBounce()` | a janela de 10 s é justo quando a ROM mata o processo (24 criações × 2 destruições no log de 08/09). Sem isso a central acorda com os rádios desligados e ninguém para religar |
+| `bounceInProgress` + a guarda de broadcast | a ROM religou o Bluetooth 3× em ~3 s no log de 08/09; sem guarda a janela é engolida. Limpo **antes** de religar, senão a guarda reverte a própria restauração |
+| `bounceGuardTick()` re-agendado a cada 5 s | não existe broadcast para "a interface reassociou", então essa metade é por polling. Com 10 s uma conferência no meio bastava; com 1 minuto ela deixaria 55 s sem vigilância |
+| `BOUNCE_PENDING` em disco + `recoverFromInterruptedBounce()` | com 1 minuto de janela, ser morto no meio dela virou caminho esperado (24 criações × 2 destruições no log de 08/09). Sem isso a central acorda com os rádios desligados e ninguém para religar |
 | `ensureAawInterfaceUp()` na ignição | cobre a interface ficar caída por fora do pisca — o teste manual "Derrubar wlan2" não a levanta de volta |
 | ciclo completo de `svc wifi` se o `ndc up` não pegar | com a `wlan2` caída o AA não funciona; custa segundos e leva o Wi-Fi de casa, mas o alternativo é AAW quebrado até o boot |
 
-Destrancar dentro da janela cancela e religa na hora — o motorista voltou.
-
-Quando o pisca está ligado, ele **manda** nos rádios na tranca e os dois toggles
-invasivos ficam ignorados (com linha no log). Sem essa regra os dois modos brigam: o
-pisca religa por projeto e a guarda de `radiosOffByLock` reverteria o religamento.
+Destrancar dentro da janela cancela e religa na hora — o motorista voltou, e fazê-lo
+esperar o resto do minuto seria o contrário do objetivo.
 
 **A pergunta aberta** é uma só: com os rádios de volta, o telefone reconecta o AA
 sozinho? Se reconectar, a sessão volta a projetar num carro vazio e o pisca não resolve.

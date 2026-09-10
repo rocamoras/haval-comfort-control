@@ -9,7 +9,7 @@ import android.content.SharedPreferences;
  * Motivo de não haver um arquivo "de UI" separado: o serviço lê estas chaves no
  * LOCKED_BOOT_COMPLETED, antes do unlock. Um arquivo em credential storage leria
  * o default em todo boot frio — e é justamente no boot que o volume inicial e a
- * restauração de Bluetooth/âncora precisam estar corretos.
+ * recuperação de um pisca interrompido ([BOUNCE_PENDING]) precisam estar corretos.
  */
 public final class Prefs {
 
@@ -28,8 +28,12 @@ public final class Prefs {
      */
     public static final String CLOSE_WINDOWS_ON_LOCK = "close_windows_on_lock";
     /**
-     * Pisca a interface do AAW e o Bluetooth ao trancar — acao PRINCIPAL da
-     * funcionalidade 2, e a que substituiu o force-stop dos pacotes de projecao.
+     * "Desativar ao trancar": pisca a interface do AAW e o Bluetooth. Desde a v1.10.0 e o
+     * UNICO modo — os alternativos "Bluetooth (invasivo)" e "Wi-Fi (invasivo)", que
+     * desligavam o radio inteiro e so religavam na ignicao, sairam.
+     *
+     * A chave mantem o nome antigo de proposito: renomear reiniciaria a preferencia de
+     * quem ja tem o app instalado.
      *
      * O force-stop foi medido em campo (09/09/2026) e nao serve: os quatro processos de
      * projecao morreram, nenhum voltou em 5 s, e a wlan2 seguiu com IP e o vizinho
@@ -39,28 +43,16 @@ public final class Prefs {
      *
      * "Piscar" e nao "desligar" porque o objetivo e duplo: a sessao cai na hora em que
      * o carro e trancado, e os radios voltam em seguida para que a proxima partida nao
-     * pague o custo de religar (~2 s medidos, mais o fallback do BluetoothAdapter).
+     * pague o custo de religar (~2 s medidos, mais o fallback do BluetoothAdapter). A
+     * janela e de 1 minuto — 10 s derrubavam a sessao mas eram curtos demais para o
+     * telefone desistir dela.
      */
     public static final String BOUNCE_RADIOS_ON_LOCK = "bounce_radios_on_lock";
-    /** Ultimo recurso: desligar o radio inteiro. Default OFF — ver DEF_DISABLE_*. */
-    public static final String DISABLE_BLUETOOTH_ON_LOCK = "disable_bluetooth_on_lock";
-    /**
-     * Desliga o Wi-Fi DA CENTRAL ao desligar o carro. O nome antigo era
-     * "disable_hotspot", de quando eu tratava isso como o tethering do TBox — o
-     * objetivo real e derrubar o Android Auto sem fio, cujo link e um AP proprio da
-     * central, fora do caminho do tethering. Chave nova de proposito: a antiga
-     * controlava outra coisa.
-     */
-    public static final String DISABLE_WIFI_ON_LOCK      = "disable_wifi_on_lock";
     public static final String KEEP_DISTRACTION_DISABLED      = "keep_distraction_disabled";
     public static final String SET_STARTUP_VOLUME             = "set_startup_volume";
     public static final String STARTUP_VOLUME                 = "startup_volume";
 
     // ── Estado interno (não aparece na UI) ─────────────────────────────
-    /** Bluetooth estava ligado quando desligamos o carro → restaurar na próxima partida. */
-    public static final String BT_RESTORE_PENDING      = "bt_restore_pending";
-    /** Wi-Fi estava ligado quando desligamos o carro → religar na próxima partida. */
-    public static final String WIFI_RESTORE_PENDING    = "wifi_restore_pending";
     /**
      * Volume inicial já aplicado neste ciclo de ignição. Sem isso, um restart do
      * serviço no meio da viagem jogaria o volume de volta para o configurado.
@@ -70,10 +62,11 @@ public final class Prefs {
     /**
      * Um "pisca" comecou e ainda nao terminou de religar.
      *
-     * Existe para a rede de seguranca do arranque: a janela de 10 s com os radios
-     * desligados e justamente quando a ROM costuma matar este processo (24 criacoes
-     * contra 2 destruicoes no log de 08/09), e sem esta flag a central acordaria com a
-     * wlan2 caida e o Bluetooth desligado, sem ninguem para religar. Fica em storage
+     * Existe para a rede de seguranca do arranque: com a janela de 1 minuto, ser morto
+     * no meio dela deixou de ser azar e passou a ser esperado de vez em quando (o log de
+     * 08/09 traz 24 criacoes do servico contra 2 destruicoes). Sem esta flag a central
+     * acordaria com a wlan2 caida e o Bluetooth desligado, sem ninguem para religar —
+     * exatamente o estado em que o teste manual de 09/09 deixou o carro. Fica em storage
      * device-protected como todo o resto, entao sobrevive a um boot frio.
      */
     public static final String BOUNCE_PENDING     = "bounce_pending";
@@ -84,19 +77,6 @@ public final class Prefs {
     // ── Defaults ──────────────────────────────────────────────────────
     public static final boolean DEF_CLOSE_WINDOWS_ON_LOCK        = true;
     public static final boolean DEF_BOUNCE_RADIOS                = true;
-    /**
-     * Desligar os radios E DEIXAR desligados vem DESLIGADO por padrao.
-     *
-     * Sao o ultimo recurso, para o caso de o pisca nao derrubar a sessao: o
-     * `svc wifi disable` esta comprovado desde a v1.2.0, ao custo de a central ficar
-     * sem internet e sem viva-voz enquanto o carro esta trancado.
-     *
-     * Quando BOUNCE_RADIOS_ON_LOCK esta ligado ele e quem manda nos radios na tranca, e
-     * estes dois sao ignorados — ver applyRadiosOff(). Sem essa regra os dois modos
-     * brigariam: o pisca religa por projeto e a guarda destes reverteria o religamento.
-     */
-    public static final boolean DEF_DISABLE_BLUETOOTH            = false;
-    public static final boolean DEF_DISABLE_WIFI                 = false;
     public static final boolean DEF_KEEP_DISTRACTION_DISABLED    = true;
     public static final boolean DEF_SET_STARTUP_VOLUME           = true;
     public static final int     DEF_STARTUP_VOLUME               = 10;

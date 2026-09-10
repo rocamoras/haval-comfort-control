@@ -118,14 +118,6 @@ private fun ComfortScreen() {
         mutableStateOf(prefs.getBoolean(
             Prefs.BOUNCE_RADIOS_ON_LOCK, Prefs.DEF_BOUNCE_RADIOS))
     }
-    var disableBluetooth by remember {
-        mutableStateOf(prefs.getBoolean(
-            Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH))
-    }
-    var disableWifi by remember {
-        mutableStateOf(prefs.getBoolean(
-            Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI))
-    }
     var keepDistractionOff by remember {
         mutableStateOf(prefs.getBoolean(
             Prefs.KEEP_DISTRACTION_DISABLED, Prefs.DEF_KEEP_DISTRACTION_DISABLED))
@@ -434,23 +426,14 @@ private fun ComfortScreen() {
             FeatureCard(
                 modifier = Modifier.weight(1f),
                 title = "Desconectar ao trancar",
-                description = "Ao trancar o carro, pisca a interface do Android Auto sem "
-                        + "fio e o Bluetooth por 10 s e religa em seguida: a sessão cai na "
-                        + "hora e os rádios voltam quentes, para a próxima partida não "
-                        + "pagar o custo de religar. Enquanto o pisca está ligado, os dois "
-                        + "toggles abaixo ficam ignorados.",
+                description = "Ao trancar o carro, derruba a interface do Android Auto sem "
+                        + "fio e o Bluetooth por 1 minuto e religa em seguida: a sessão cai "
+                        + "na hora e os rádios voltam quentes, para a próxima partida não "
+                        + "pagar o custo de religar.",
                 toggles = listOf(
-                    Toggle("Piscar rádios (10 s)", bounceRadios) {
+                    Toggle("Desativar", bounceRadios) {
                         bounceRadios = it
                         prefs.edit().putBoolean(Prefs.BOUNCE_RADIOS_ON_LOCK, it).apply()
-                    },
-                    Toggle("Bluetooth desligado (invasivo)", disableBluetooth) {
-                        disableBluetooth = it
-                        prefs.edit().putBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, it).apply()
-                    },
-                    Toggle("Wi-Fi desligado (invasivo)", disableWifi) {
-                        disableWifi = it
-                        prefs.edit().putBoolean(Prefs.DISABLE_WIFI_ON_LOCK, it).apply()
                     },
                 )
             )

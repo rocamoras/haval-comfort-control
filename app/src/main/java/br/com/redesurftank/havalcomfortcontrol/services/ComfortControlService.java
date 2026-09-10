@@ -108,15 +108,22 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * preso no carro.
      *
      * Piscar resolve os dois lados: a sessao cai na tranca e os radios voltam quentes
-     * para a proxima partida. 10 s e o valor a calibrar — curto demais o telefone talvez
-     * nao note, longo demais aumenta a janela em que a ROM pode nos matar no meio.
+     * para a proxima partida.
+     *
+     * 1 minuto, calibrado em campo: 10 s derrubavam a sessao, mas eram curtos demais
+     * para o telefone desistir dela. O preco de uma janela seis vezes maior e a chance de
+     * a ROM matar este processo no meio — o que faz a rede de seguranca do BOUNCE_PENDING
+     * deixar de ser precaucao e virar caminho esperado de vez em quando.
      */
-    private static final long BOUNCE_OFF_MS = 10_000;
+    private static final long BOUNCE_OFF_MS = 60_000;
     /**
-     * Meio da janela: a ROM pode levantar a interface de volta sozinha. Se levantou,
-     * derrubamos de novo — e o log registra que isso aconteceu.
+     * Intervalo da guarda DENTRO da janela, re-agendada ate o fim dela.
+     *
+     * Com 10 s uma unica conferencia no meio cobria a janela; com 1 minuto ela deixaria
+     * 55 s sem vigilancia, e tanto a ROM (que religou o Bluetooth 3x em ~3 s no log de
+     * 08/09) quanto o supplicant tem tempo de sobra para desfazer o pisca.
      */
-    private static final long BOUNCE_MIDCHECK_MS = 5_000;
+    private static final long BOUNCE_GUARD_INTERVAL_MS = 5_000;
     /**
      * Conferencias depois de religar. Existem para responder a UNICA pergunta que o
      * pisca deixa em aberto: com os radios de volta, o telefone reconecta o AA sozinho?
@@ -215,19 +222,12 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      */
     private boolean lockActionDone = false;
     /**
-     * Nos desligamos os radios por causa da tranca. So enquanto isto for true a guarda
-     * reverte um religamento — assim ela nao briga com o usuario que destrancou e
-     * voltou, nem com o carro apenas desligado sem ninguem ter saido.
-     */
-    private boolean radiosOffByLock = false;
-    /**
      * Estamos dentro da janela de {@link #BOUNCE_OFF_MS} do pisca.
      *
      * Serve para a MESMA guarda de radioGuardReceiver: o log de 08/09 mostra a ROM
      * religando o Bluetooth tres vezes em ~3 s depois de desligarmos, e sem guarda a
-     * janela do pisca seria engolida. A diferenca em relacao a radiosOffByLock e que
-     * este flag e limpo ANTES de religarmos, senao a guarda reverteria a nossa propria
-     * restauracao.
+     * janela do pisca seria engolida. E limpo ANTES de religarmos, senao a guarda
+     * reverteria a nossa propria restauracao.
      */
     private boolean bounceInProgress = false;
     /** Reavaliacoes restantes da tranca; ver LOCK_RECHECK_DELAY_MS. */
@@ -242,8 +242,8 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * objeto novo, e o removeCallbacks do cancelamento antecipado nao casaria com o que
      * foi enfileirado.
      */
-    private final Runnable bounceRestoreRunnable  = this::bounceRestore;
-    private final Runnable bounceMidCheckRunnable = this::bounceMidCheck;
+    private final Runnable bounceRestoreRunnable = this::bounceRestore;
+    private final Runnable bounceGuardRunnable   = this::bounceGuardTick;
 
     /**
      * Chaves que disparam acao. vehicle_speed, gear_status e engine_state ficam DE
@@ -484,8 +484,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
         if (isReady) {
             applyStartupVolumeIfPending();
-            restoreBluetoothIfPending();
-            restoreWifiIfPending();
+            ensureAawInterfaceUp();
         } else {
             // Carro desligado no start NAO e mais motivo para desligar radio nenhum: o
             // gatilho agora e a tranca, e a central passa minutos ligada com o carro
@@ -526,16 +525,13 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
         if (isReady) {
             PersistentLog.w(TAG, "veiculo ligado (driving_ready=" + value + ")");
-            // Carro ligou: a guarda para de reverter religamentos e a proxima trancada
-            // volta a poder agir, mesmo que o destrancar nao tenha sido observado.
-            lockActionDone  = false;
-            radiosOffByLock = false;
+            // Carro ligou: a proxima trancada volta a poder agir, mesmo que o destrancar
+            // nao tenha sido observado.
+            lockActionDone = false;
             // ORDEM E LATENCIA: o volume e uma unica chamada de binder e resolve na
             // hora; Bluetooth e ancora precisam criar processos via Shizuku, o que
             // custa dezenas/centenas de ms. Volume primeiro, sempre.
             applyStartupVolumeIfPending();
-            restoreBluetoothIfPending();
-            restoreWifiIfPending();
             ensureAawInterfaceUp();
         } else {
             PersistentLog.w(TAG, "veiculo desligado (driving_ready=" + value + ")");
@@ -563,17 +559,16 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         if (DOOR_UNLOCKED.equals(value)) {
             // Destrancou: libera para agir na proxima trancada e para de reverter os
             // radios, senao a guarda brigaria com o usuario que acabou de voltar.
-            if (lockActionDone || radiosOffByLock) log("carro destrancado");
+            if (lockActionDone) log("carro destrancado");
             // Destrancou dentro da janela do pisca: o motorista voltou, e faze-lo esperar
             // o resto dos 10 s por Bluetooth e Wi-Fi seria o contrario do objetivo.
             if (bounceInProgress) {
-                react.removeCallbacks(bounceMidCheckRunnable);
+                react.removeCallbacks(bounceGuardRunnable);
                 react.removeCallbacks(bounceRestoreRunnable);
                 log("destrancou dentro da janela do pisca — religando agora");
                 bounceRestore();
             }
             lockActionDone   = false;
-            radiosOffByLock  = false;
             lockRechecksLeft = 0;
             return;
         }
@@ -613,7 +608,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         if (prefs.getBoolean(Prefs.CLOSE_WINDOWS_ON_LOCK, Prefs.DEF_CLOSE_WINDOWS_ON_LOCK)) {
             if (closeAllWindows()) log("vidros fechados");
         }
-        applyRadiosOff();
+        applyDisconnectOnLock();
     }
 
     private static boolean isEngineOff(String engineState) {
@@ -640,7 +635,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * Carro desligado: agora isto NAO toca nos radios. Desligar o carro nao significa
      * que o motorista foi embora — a central fica ligada minutos, e era ai que o
      * Android Auto continuava conectado com alguem ainda dentro do carro. Quem desliga
-     * radio e a tranca, em applyRadiosOff().
+     * radio e a tranca, em applyDisconnectOnLock().
      */
     private void applyPowerOff() {
         prefs.edit().putBoolean(Prefs.VOLUME_APPLIED_THIS_CYCLE, false).apply();
@@ -650,71 +645,31 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     /**
      * Metade "desconectar" do gatilho de tranca — funcionalidade 2.
      *
-     * Ordem por invasividade: encerrar o receiver resolve sem efeito colateral, e
-     * desligar radio e ultimo recurso (default OFF).
+     * Havia aqui dois modos alternativos, "Bluetooth (invasivo)" e "Wi-Fi (invasivo)",
+     * que desligavam o radio inteiro e SO religavam na ignicao. Sairam na v1.10.0: o
+     * pisca faz o mesmo servico sem deixar a central sem internet nem viva-voz enquanto o
+     * carro esta trancado, e sem pagar o religamento na partida. Manter os tres era
+     * manter dois modos que brigam — o pisca religa por projeto, e a guarda do modo
+     * invasivo revertia justamente esse religamento.
      */
-    private void applyRadiosOff() {
-        if (prefs.getBoolean(Prefs.BOUNCE_RADIOS_ON_LOCK, Prefs.DEF_BOUNCE_RADIOS)) {
-            dumpProjectionDiagnostics("antes do pisca");
-            bounceRadios();
-            // O pisca MANDA nos radios nesta tranca. Deixar os toggles invasivos rodarem
-            // junto poria os dois modos a brigar: o pisca religa por projeto, e a guarda
-            // de radiosOffByLock reverteria esse religamento na hora.
-            if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
-                    || prefs.getBoolean(Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
-                log("pisca ativo — os desligamentos permanentes de radio ficam ignorados");
-            }
-            pushUiState();
+    private void applyDisconnectOnLock() {
+        if (!prefs.getBoolean(Prefs.BOUNCE_RADIOS_ON_LOCK, Prefs.DEF_BOUNCE_RADIOS)) {
+            log("desativar ao trancar esta desligado — nada a fazer");
             return;
         }
-        boolean acted = false;
-        if (prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)
-                && isBluetoothOn()) {
-            prefs.edit().putBoolean(Prefs.BT_RESTORE_PENDING, true).apply();
-            setBluetoothEnabled(false);
-            log("Bluetooth desligado");
-            acted = true;
-        }
-        if (prefs.getBoolean(Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
-            if (isWifiOn()) {
-                prefs.edit().putBoolean(Prefs.WIFI_RESTORE_PENDING, true).apply();
-                setWifiEnabled(false);
-                log("Wi-Fi da central desligado");
-            } else {
-                log("Wi-Fi ja estava desligado");
-            }
-            acted = true;
-        }
-        if (acted) radiosOffByLock = true;
+        dumpProjectionDiagnostics("antes do pisca");
+        bounceRadios();
         pushUiState();
     }
 
-    private void restoreBluetoothIfPending() {
-        if (!prefs.getBoolean(Prefs.DISABLE_BLUETOOTH_ON_LOCK,
-                Prefs.DEF_DISABLE_BLUETOOTH)) return;
-        if (!prefs.getBoolean(Prefs.BT_RESTORE_PENDING, false)) return;
-        // O pendente e consumido mesmo se ja estiver ligado: sem isso um Bluetooth
-        // religado pela central antes de nos deixaria a flag para sempre, e um
-        // desligamento manual mais tarde acabaria "restaurado" numa partida futura.
-        prefs.edit().putBoolean(Prefs.BT_RESTORE_PENDING, false).apply();
-        if (isBluetoothOn()) return;
-        setBluetoothEnabled(true);
-        log("carro ligado, Bluetooth religado");
-    }
-
-    private void restoreWifiIfPending() {
-        if (!prefs.getBoolean(Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) return;
-        if (!prefs.getBoolean(Prefs.WIFI_RESTORE_PENDING, false)) return;
-        prefs.edit().putBoolean(Prefs.WIFI_RESTORE_PENDING, false).apply();
-        if (isWifiOn()) return;
-        setWifiEnabled(true);
-        log("carro ligado, Wi-Fi da central religado");
-    }
-
     /**
-     * Guarda dos radios: a central religa o Bluetooth e a ancora por conta propria
-     * depois que desligamos. Sem este receiver a funcionalidade 2 nao pega —
-     * desligavamos e a ROM ligava de volta segundos depois.
+     * Guarda da janela do pisca: a central religa o Bluetooth por conta propria depois
+     * que desligamos — tres vezes em ~3 s no log de 08/09 18:38. Sem este receiver a
+     * janela seria engolida e o pisca nao surtiria efeito.
+     *
+     * O ramo do Wi-Fi saiu junto com o modo invasivo: o pisca nao mexe no `svc wifi`, ele
+     * derruba a interface pelo `ndc`, o que nao emite WIFI_STATE_CHANGED. Quem vigia a
+     * interface e bounceGuardTick(), por polling, porque nao existe broadcast para isso.
      */
     private void registerRadioGuard() {
         radioGuardReceiver = new BroadcastReceiver() {
@@ -727,29 +682,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                             BluetoothAdapter.ERROR);
                     if (state != BluetoothAdapter.STATE_ON) return;
                     react.post(() -> {
-                        // Duas guardas distintas: bounceInProgress protege a janela de 10 s
-                        // do pisca (a ROM religou o Bluetooth 3x em ~3s no log de 08/09), e
-                        // radiosOffByLock protege o desligamento permanente do toggle
-                        // invasivo. A do pisca nao consulta pref: quem decidiu foi o pisca.
+                        // Nao consulta pref nenhuma: quem decidiu desligar foi o pisca, e
+                        // enquanto a janela dele esta aberta ele manda.
                         if (bounceInProgress) {
                             setBluetoothEnabled(false);
                             log("pisca: Bluetooth religou na janela, desligado de novo");
-                        } else if (radiosOffByLock && prefs.getBoolean(
-                                Prefs.DISABLE_BLUETOOTH_ON_LOCK, Prefs.DEF_DISABLE_BLUETOOTH)) {
-                            setBluetoothEnabled(false);
-                            log("Bluetooth religou com o carro trancado, desligado de novo");
-                        }
-                        pushUiState();
-                    });
-                } else if (WifiManager.WIFI_STATE_CHANGED_ACTION.equals(action)) {
-                    int state = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE,
-                            WifiManager.WIFI_STATE_UNKNOWN);
-                    if (state != WifiManager.WIFI_STATE_ENABLED) return;
-                    react.post(() -> {
-                        if (radiosOffByLock && prefs.getBoolean(
-                                Prefs.DISABLE_WIFI_ON_LOCK, Prefs.DEF_DISABLE_WIFI)) {
-                            setWifiEnabled(false);
-                            log("Wi-Fi religou com o carro trancado, desligado de novo");
                         }
                         pushUiState();
                     });
@@ -757,7 +694,6 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             }
         };
         IntentFilter filter = new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED);
-        filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         ContextCompat.registerReceiver(this, radioGuardReceiver, filter,
                 ContextCompat.RECEIVER_EXPORTED);
     }
@@ -947,8 +883,8 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         if (btWasOn) setBluetoothEnabled(false);
         else log("pisca: Bluetooth ja estava desligado");
 
-        react.postDelayed(bounceMidCheckRunnable, BOUNCE_MIDCHECK_MS);
-        react.postDelayed(bounceRestoreRunnable,  BOUNCE_OFF_MS);
+        react.postDelayed(bounceGuardRunnable,   BOUNCE_GUARD_INTERVAL_MS);
+        react.postDelayed(bounceRestoreRunnable, BOUNCE_OFF_MS);
     }
 
     /**
@@ -956,11 +892,13 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * teria sido inofensivo. Derruba de novo e deixa isso registrado — se aparecer no
      * log, a janela precisa de uma guarda de verdade e nao de uma conferencia.
      */
-    private void bounceMidCheck() {
+    private void bounceGuardTick() {
         if (!bounceInProgress) return;
-        if (AawLink.ipv4() == null) return;
-        log("pisca: " + AawLink.IFACE + " reassociou no meio da janela — derrubando de novo");
-        AawLink.setUp(false);
+        if (AawLink.ipv4() != null) {
+            log("pisca: " + AawLink.IFACE + " reassociou dentro da janela — derrubando de novo");
+            AawLink.setUp(false);
+        }
+        react.postDelayed(bounceGuardRunnable, BOUNCE_GUARD_INTERVAL_MS);
     }
 
     private void bounceRestore() {
@@ -969,6 +907,8 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         // Limpo ANTES de religar: com o flag de pe, radioGuardReceiver reverteria a
         // nossa propria restauracao do Bluetooth.
         bounceInProgress = false;
+        // A guarda se re-agenda sozinha; sem isto ela seguiria acordando depois do fim.
+        react.removeCallbacks(bounceGuardRunnable);
         restoreRadiosAfterBounce(btWasOn, wifiWasOn, "pisca");
         scheduleBounceVerification();
     }
