@@ -14,6 +14,7 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import br.com.redesurftank.havalcomfortcontrol.App;
 
@@ -81,6 +82,26 @@ public final class PersistentLog {
             WRITER.execute(() -> appendLine(line));
         } catch (Exception e) {
             // Executor recusou (shutdown) — nada a fazer, o logcat já recebeu.
+        }
+    }
+
+    /**
+     * Espera a fila de escrita drenar.
+     *
+     * A escrita é assíncrona — {@link #write} só enfileira. Isso é o certo em todo uso
+     * normal, e errado numa única situação: quando o próximo passo mata o processo de
+     * propósito. Desligar a central é exatamente isso, e sem este flush as últimas
+     * linhas — justamente as que dizem o que ia acontecer — morreriam na fila.
+     *
+     * @return true se a fila drenou dentro do prazo.
+     */
+    public static boolean flush(long timeoutMs) {
+        try {
+            WRITER.submit(() -> { }).get(timeoutMs, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "flush do log nao concluiu: " + e);
+            return false;
         }
     }
 

@@ -547,6 +547,17 @@ private fun ComfortScreen() {
                             busy = probeRunning == "Force-stop projeção",
                             enabled = probeRunning.isEmpty()
                         ) { runProbe("Force-stop projeção", ProjectionProbe::forceStopProjection) }
+
+                        ProbeButton(
+                            modifier = Modifier.weight(1f),
+                            label = "Desligar a central",
+                            hint = "A central já boota do zero a cada uso, então não custa "
+                                    + "a partida. Mas é o único teste do qual o app não "
+                                    + "tem como te trazer de volta.",
+                            container = Color(0xFFB71C1C),
+                            busy = probeRunning == "Desligar a central",
+                            enabled = probeRunning.isEmpty()
+                        ) { runProbe("Desligar a central", ProjectionProbe::powerOffHeadUnit) }
                     }
                     Spacer(Modifier.height(12.dp))
                     Box(

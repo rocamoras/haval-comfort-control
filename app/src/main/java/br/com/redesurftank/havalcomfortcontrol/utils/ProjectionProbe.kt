@@ -1,10 +1,10 @@
 package br.com.redesurftank.havalcomfortcontrol.utils
 
 /**
- * Dois testes de campo, disparados à mão pela UI. **Os dois já rodaram no carro
- * (09/09/2026) e deram resposta** — ficam porque são o instrumento que responde de novo
- * se a ROM ou o telefone mudarem, e porque o relatório deles é o que documenta o
- * comportamento atual.
+ * Testes de campo do Android Auto sem fio, disparados à mão pela UI. Os dois primeiros
+ * já rodaram no carro (09/09/2026) e **deram resposta** — ficam porque são o instrumento
+ * que responde de novo se a ROM ou o telefone mudarem, e porque o relatório deles é o que
+ * documenta o comportamento atual. O terceiro, [powerOffHeadUnit], ainda não rodou.
  *
  * ### [forceStopProjection] — respondido: NÃO derruba a sessão
  *
@@ -57,6 +57,35 @@ object ProjectionProbe {
 
     /** Espera antes da segunda conferência: o link pode voltar sozinho. */
     private const val RECHECK_DELAY_MS = 5_000L
+
+    /**
+     * Quanto esperar por um desligamento antes de declarar que o comando não pegou.
+     *
+     * Um shutdown ordenado não é instantâneo: o `PowerManager` avisa os serviços, espera
+     * o broadcast de ACTION_SHUTDOWN e só então derruba. Declarar falha em 200 ms faria a
+     * escada correr inteira enquanto o primeiro degrau ainda estava funcionando.
+     */
+    private const val POWEROFF_SETTLE_MS = 6_000L
+
+    /**
+     * Caminhos para desligar a central, do mais provável para o mais exótico — mesma
+     * forma de escada que resolveu a [dropAawInterface], e pelo mesmo motivo: nenhum é
+     * garantido com uid de `shell` e só o carro diz qual esta ROM aceita.
+     *
+     * - `svc power shutdown` chama `IPowerManager.shutdown()` e exige a permissão REBOOT,
+     *   que o shell costuma ter;
+     * - `reboot -p` é o toybox, normalmente root;
+     * - a activity de ACTION_REQUEST_SHUTDOWN é o caminho da UI do sistema;
+     * - `setprop sys.powerctl shutdown` fala com o init, e o SELinux costuma barrar.
+     */
+    private val SHUTDOWN_COMMANDS = arrayOf(
+        "svc power shutdown",
+        "reboot -p",
+        "am start -a android.intent.action.ACTION_REQUEST_SHUTDOWN "
+                + "--ez android.intent.extra.KEY_CONFIRM false "
+                + "--ez android.intent.extra.USER_REQUESTED_SHUTDOWN true",
+        "setprop sys.powerctl shutdown",
+    )
 
     /**
      * Alvos do force-stop. Os oito pacotes de projeção instalados nesta ROM, conforme o
@@ -185,6 +214,66 @@ object ProjectionProbe {
         snapshotProcesses(r, "${RECHECK_DELAY_MS / 1000}s depois")
         snapshotServices(r, "${RECHECK_DELAY_MS / 1000}s depois")
         r.line("CONFIRA NO CELULAR: o Android Auto caiu de verdade?")
+        return r.finish()
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Teste 3 — desligar a central
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Desliga a central, se a ROM deixar.
+     *
+     * ## Por que isto vale um teste
+     *
+     * O `uptime do device` que o [PersistentLog] grava a cada arranque diz que **a
+     * central já faz um boot frio a cada uso do carro**: em 15 sessões do log de
+     * 05→08/09, o serviço sempre sobe com o device entre 11 s e 14 s de uptime. O uptime
+     * zerar (e não acumular, como aconteceria num sleep) significa kernel reiniciado.
+     *
+     * Isso derruba a objeção óbvia. Desligar a central **não custa nada na partida
+     * seguinte**, porque ela ia bootar do zero de qualquer forma — o requisito de
+     * "conectar o mais rápido possível" fica intacto.
+     *
+     * ## O que ainda não se sabe
+     *
+     * Quanto tempo a ROM mantém a central ligada depois da tranca — é esse o tamanho do
+     * prêmio, e o log atual não responde: a última linha de cada sessão é sempre a
+     * verificação agendada, não o desligamento. Por isso o serviço passou a emitir um
+     * heartbeat pós-tranca; a última marcação antes do silêncio dá a resposta com ~1 min
+     * de resolução.
+     *
+     * ## Cuidados
+     *
+     * Este é o único teste do qual **o app não tem como se recuperar** — todos os outros
+     * têm rede de segurança no arranque do serviço, e aqui o serviço deixa de existir. Se
+     * a central não voltar sozinha na ignição, não há nada no app que conserte.
+     *
+     * Cada tentativa é precedida de um [PersistentLog.flush]: a escrita é assíncrona, e
+     * sem isso a linha que diz qual comando estava sendo tentado morreria na fila junto
+     * com o processo — o teste não deixaria evidência nenhuma do que fez.
+     */
+    fun powerOffHeadUnit(): String {
+        val r = Report()
+        r.line("===== teste: desligar a central =====")
+        if (!requireShizuku(r)) return r.finish()
+
+        r.line("[antes] ${AawLink.describe()}")
+        r.line("[antes] projecao=${AawLink.projectionProcessesLine()}")
+        r.line("AVISO: se algum comando pegar, o processo morre no meio deste relatorio —")
+        r.line("       a ULTIMA linha de tentativa e a que desligou. O log e descarregado")
+        r.line("       em disco antes de cada tentativa justamente para isso.")
+
+        for (cmd in SHUTDOWN_COMMANDS) {
+            r.line("tentando: $cmd")
+            PersistentLog.flush(2_000)
+            val res = sh(cmd)
+            // Se a execucao chegou aqui, ou o comando falhou ou o desligamento e lento.
+            sleep(POWEROFF_SETTLE_MS)
+            r.line("[$cmd] seguimos vivos apos ${POWEROFF_SETTLE_MS / 1000}s — ${res.describeFailure()}")
+        }
+
+        r.line("RESULTADO: nenhum comando desligou a central com uid de shell.")
         return r.finish()
     }
 

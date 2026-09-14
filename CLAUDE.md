@@ -178,13 +178,39 @@ sozinho? Se reconectar, a sessão volta a projetar num carro vazio e o pisca nã
 `scheduleBounceVerification()` registra `wlan2`, processos de projeção e o aparelho
 Bluetooth conectado em 15 s, 30 s e 60 s — um ciclo de teste responde.
 
+### A central já boota do zero a cada uso (medido 05→08/09)
+
+O `uptime do device` que o `PersistentLog` grava a cada arranque responde uma pergunta
+que nunca tinha sido feita: **em 15 sessões, o serviço sempre sobe com o device entre
+11 s e 14 s de uptime**. O uptime zerar — em vez de acumular, como aconteceria num sleep
+— significa kernel reiniciado.
+
+Consequência prática: a central não dorme entre usos, ela desliga e boota. Isso derruba
+a objeção óbvia a desligá-la à mão na tranca — **não custaria nada na partida seguinte**,
+que ia ser um boot frio de qualquer jeito.
+
+O que ainda falta para decidir é o tamanho do prêmio: por quanto tempo a ROM mantém a
+central ligada depois da tranca. O log não respondia, porque a última linha de cada
+sessão era sempre a verificação agendada do pisca — "as linhas pararam" não distinguia
+"a central desligou" de "acabou o que havia para logar". Daí o **heartbeat pós-tranca**
+(`HEARTBEAT_INTERVAL_MS`, 20 marcações de 1 min): a última marcação antes do silêncio dá
+a resposta com ~1 min de resolução.
+
 ### Testes manuais — botão Teste AAW
 
-`utils/ProjectionProbe.kt`, dois botões separados. Os dois já responderam (acima); ficam
-como instrumento para medir de novo se a ROM ou o telefone mudarem.
+`utils/ProjectionProbe.kt`, três botões separados. Os dois primeiros já responderam
+(acima) e ficam como instrumento para medir de novo se a ROM ou o telefone mudarem.
 
-**Cuidado:** "Derrubar wlan2" derruba e **não levanta de volta**. Quem restaura é o pisca
-do serviço ou o `ensureAawInterfaceUp()` da ignição.
+**Desligar a central** é o terceiro e ainda não rodou. Escada de `svc power shutdown` →
+`reboot -p` → activity de `ACTION_REQUEST_SHUTDOWN` → `setprop sys.powerctl shutdown`,
+com 6 s de espera entre os degraus porque um shutdown ordenado não é instantâneo.
+
+**Cuidados.** "Derrubar wlan2" derruba e **não levanta de volta** — quem restaura é o
+pisca ou o `ensureAawInterfaceUp()` da ignição. E "Desligar a central" é o único teste do
+qual o app **não tem como se recuperar**: todos os outros têm rede de segurança no
+arranque do serviço, e aqui o serviço deixa de existir. Cada tentativa é precedida de
+`PersistentLog.flush()`, senão a linha que diz qual comando estava sendo tentado morreria
+na fila junto com o processo.
 
 O receiver está medido como `com.ts.androidauto.app/.display.AapActivity` (app de
 sistema VENDOR, Android 9) — ver a memória `central-haval-fatos`. A ROM tem **oito**

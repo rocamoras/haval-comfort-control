@@ -132,6 +132,21 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     private static final long[] BOUNCE_VERIFY_DELAYS_MS = {15_000, 30_000, 60_000};
     /** Espera entre o disable e o enable no fallback de ciclo completo de Wi-Fi. */
     private static final long WIFI_CYCLE_GAP_MS = 2_000;
+    /**
+     * Heartbeat depois da tranca — existe para medir UMA coisa: por quanto tempo a ROM
+     * mantem a central ligada depois que o carro e trancado.
+     *
+     * Esse numero e o tamanho do premio de desligar a central a mao, e o log nao o tinha:
+     * a ultima linha de cada sessao era sempre a verificacao agendada do pisca, nao o
+     * desligamento, entao "as linhas pararam" nao distinguia "a central desligou" de
+     * "acabou o que havia para logar". Com o heartbeat, a ultima marcacao antes do
+     * silencio responde com ~1 min de resolucao.
+     *
+     * Teto de 20 marcacoes: o log rotativo tem 192 KB e a evidencia do pisca vale mais
+     * que a vigesima primeira linha de "central viva".
+     */
+    private static final long HEARTBEAT_INTERVAL_MS = 60_000;
+    private static final int  HEARTBEAT_MAX         = 20;
     /** Pistas para descobrir no log um receiver diferente destes, se houver. */
     private static final String[] PROJECTION_HINTS = {
             "androidauto", "gearhead", "carlife", "carplay", "hicar", "zlink", "easyconn"
@@ -244,6 +259,12 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      */
     private final Runnable bounceRestoreRunnable = this::bounceRestore;
     private final Runnable bounceGuardRunnable   = this::bounceGuardTick;
+    private final Runnable heartbeatRunnable     = this::heartbeatTick;
+
+    /** Marcacoes restantes do heartbeat pos-tranca; 0 = desligado. */
+    private int  heartbeatsLeft = 0;
+    /** elapsedRealtime da tranca, base do "N min apos a tranca". */
+    private long lockedAtMs     = 0;
 
     /**
      * Chaves que disparam acao. vehicle_speed, gear_status e engine_state ficam DE
@@ -528,6 +549,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             // Carro ligou: a proxima trancada volta a poder agir, mesmo que o destrancar
             // nao tenha sido observado.
             lockActionDone = false;
+            stopPostLockHeartbeat("ignicao");
             // ORDEM E LATENCIA: o volume e uma unica chamada de binder e resolve na
             // hora; Bluetooth e ancora precisam criar processos via Shizuku, o que
             // custa dezenas/centenas de ms. Volume primeiro, sempre.
@@ -570,6 +592,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             }
             lockActionDone   = false;
             lockRechecksLeft = 0;
+            stopPostLockHeartbeat("destranque");
             return;
         }
         if (!DOOR_LOCKED.equals(value)) return;
@@ -659,7 +682,40 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         }
         dumpProjectionDiagnostics("antes do pisca");
         bounceRadios();
+        startPostLockHeartbeat();
         pushUiState();
+    }
+
+    /**
+     * Comeca a marcar presenca a cada minuto. Nao ha nada de automatico nisto: e pura
+     * medicao, e a linha que importa e a ULTIMA — a que vem antes de a central desligar.
+     */
+    private void startPostLockHeartbeat() {
+        lockedAtMs     = SystemClock.elapsedRealtime();
+        heartbeatsLeft = HEARTBEAT_MAX;
+        react.removeCallbacks(heartbeatRunnable);
+        react.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
+    }
+
+    private void heartbeatTick() {
+        long minutos = (SystemClock.elapsedRealtime() - lockedAtMs) / 60_000;
+        if (--heartbeatsLeft <= 0) {
+            PersistentLog.w(TAG, "heartbeat: " + minutos + " min apos a tranca e a central"
+                    + " segue viva — fim das marcacoes");
+            return;
+        }
+        PersistentLog.w(TAG, "heartbeat: central viva " + minutos + " min apos a tranca");
+        react.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
+    }
+
+    /** Fim do ciclo (ignicao ou destranque): a central seguiu viva ate aqui. */
+    private void stopPostLockHeartbeat(String motivo) {
+        if (heartbeatsLeft <= 0) return;
+        long minutos = (SystemClock.elapsedRealtime() - lockedAtMs) / 60_000;
+        heartbeatsLeft = 0;
+        react.removeCallbacks(heartbeatRunnable);
+        PersistentLog.w(TAG, "heartbeat: parado por " + motivo + " — a central ficou viva"
+                + " pelo menos " + minutos + " min apos a tranca");
     }
 
     /**
