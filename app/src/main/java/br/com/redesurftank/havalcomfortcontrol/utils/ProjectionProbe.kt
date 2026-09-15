@@ -1,10 +1,10 @@
 package br.com.redesurftank.havalcomfortcontrol.utils
 
 /**
- * Testes de campo do Android Auto sem fio, disparados à mão pela UI. Os dois primeiros
- * já rodaram no carro (09/09/2026) e **deram resposta** — ficam porque são o instrumento
- * que responde de novo se a ROM ou o telefone mudarem, e porque o relatório deles é o que
- * documenta o comportamento atual. O terceiro, [powerOffHeadUnit], ainda não rodou.
+ * Testes de campo do Android Auto sem fio, disparados à mão pela UI. **Os três já rodaram
+ * no carro e deram resposta** — ficam porque são o instrumento que responde de novo se a
+ * ROM ou o telefone mudarem, e porque o relatório deles é o que documenta o comportamento
+ * atual.
  *
  * ### [forceStopProjection] — respondido: NÃO derruba a sessão
  *
@@ -33,12 +33,12 @@ package br.com.redesurftank.havalcomfortcontrol.utils
  * [ndc interface setcfg wlan2 down]   ok | ip agora=(nenhum) -> CAIU
  * ```
  * Os dois primeiros devolveram **exit 0 sem fazer nada**. É esse comando que virou
- * produção em [AawLink.setUp], usado pelo pisca dos rádios na tranca.
+ * produção em [AawLink.setUp], usado pelo hold dos rádios na tranca.
  *
  * Cuidado ao rodar este teste: ele derruba a interface e **não a levanta de volta**. Foi
  * assim que a central ficou sem Android Auto (e com o áudio do telefone preso, porque o
- * Bluetooth seguiu conectado) depois da rodada de 09/09. Quem restaura é o pisca do
- * serviço, não o teste.
+ * Bluetooth seguiu conectado) depois da rodada de 09/09. Quem restaura é o hold do
+ * serviço ou o `ensureAawInterfaceUp()` da ignição, não o teste.
  *
  * ## Como os dois provam algo
  *
@@ -235,13 +235,17 @@ object ProjectionProbe {
      * seguinte**, porque ela ia bootar do zero de qualquer forma — o requisito de
      * "conectar o mais rápido possível" fica intacto.
      *
-     * ## O que ainda não se sabe
+     * ## RESPONDIDO (14 e 15/09/2026): reinicia, não desliga
      *
-     * Quanto tempo a ROM mantém a central ligada depois da tranca — é esse o tamanho do
-     * prêmio, e o log atual não responde: a última linha de cada sessão é sempre a
-     * verificação agendada, não o desligamento. Por isso o serviço passou a emitir um
-     * heartbeat pós-tranca; a última marcação antes do silêncio dá a resposta com ~1 min
-     * de resolução.
+     * Três rodadas, idênticas. O processo morre em `tentando: svc power shutdown` e ~21 a
+     * 25 s depois volta um processo novo com `uptime do device 11s`. O comando **funciona**
+     * — a central desliga de verdade — mas o power manager a traz de volta, porque ela é
+     * alimentada pelo carro e a energia continua lá. Os outros três degraus da escada
+     * nunca chegaram a rodar: o primeiro matou o processo e a escada parou ali.
+     *
+     * Desligar sem cortar a alimentação não existe nesta central. O que a medição deu de
+     * útil foi outra coisa: a ROM desliga a central sozinha 3 a 4 min depois da tranca, e
+     * é isso que hoje encerra o hold dos rádios.
      *
      * ## Cuidados
      *

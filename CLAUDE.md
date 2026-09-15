@@ -83,9 +83,9 @@ seria churn constante para cobrir uma corrida de segundos.
 Dois flags de estado governam o ciclo:
 - `lockActionDone` — a ROM repete `door_lock_status=1`; sem isso cada repetição
   refaria tudo. Zera ao destrancar e na partida.
-- `bounceInProgress` — a janela do pisca está aberta, e a guarda reverte qualquer
-  religamento de Bluetooth dentro dela. Limpo **antes** de religarmos, senão a guarda
-  reverteria a própria restauração.
+- `holdInProgress` — os rádios estão derrubados desde a tranca, e a guarda reverte
+  qualquer religamento de Bluetooth enquanto isso durar. Limpo **antes** de religarmos,
+  senão a guarda reverteria a própria restauração.
 
 ## Android Auto sem fio (funcionalidade 2)
 
@@ -134,79 +134,74 @@ de processo*. `app=ProcessRecord{... 3818:com.ts.androidauto/1000}` no `ServiceR
 `com.ts.androidauto`, que não é pacote instalado. Use `ps` — é o que
 `AawLink.projectionProcesses()` faz.
 
-### O pisca dos rádios — o único modo (v1.9.0, calibrado na v1.10.0)
+### Derruba e segura — a ação da funcionalidade 2 (v1.12.0)
 
-Ação da funcionalidade 2, no toggle **Desativar**. Ao trancar: derruba `wlan2` e
-Bluetooth, espera **1 minuto**, religa **na mesma ordem**.
+Toggle **Desativar**. Ao trancar: derruba `wlan2` e Bluetooth **nessa ordem** e os mantém
+derrubados. Quem encerra, no caminho normal, é a própria ROM desligando a central.
 
-A v1.10.0 mudou a janela de 10 s para 1 minuto (10 s derrubavam a sessão, mas eram
-curtos demais para o telefone desistir dela) e **removeu os dois modos alternativos**,
-"Bluetooth (invasivo)" e "Wi-Fi (invasivo)", que desligavam o rádio inteiro e só
-religavam na ignição. O pisca faz o mesmo serviço sem deixar a central sem internet nem
-viva-voz com o carro trancado, e sem pagar o religamento na partida — e manter os três
-era manter dois modos que brigam entre si. Saíram com eles `radiosOffByLock`,
-`restoreBluetoothIfPending()`, `restoreWifiIfPending()`, `BT_RESTORE_PENDING`,
-`WIFI_RESTORE_PENDING` e o ramo de Wi-Fi da guarda de rádios.
+A ordem não é arbitrária: o link sustenta a sessão de projeção, e o Bluetooth é o que
+mantém o áudio do telefone preso no carro. Com `wlan2` caída e Bluetooth ligado — medido
+em 09/09 — dá o pior dos dois mundos: AA sem funcionar **e** áudio capturado.
 
-Por que piscar e não desligar — os dois lados do requisito:
+#### Por que deixou de ser um "pisca"
 
-- **desligar imediato**: a sessão cai no instante da tranca, que é o que o force-stop
-  nunca conseguiu;
-- **ligar rápido**: os rádios voltam quentes. O caminho antigo (toggles invasivos) deixava
-  tudo desligado e pagava na ignição — `07:18:26.886 Bluetooth religado`,
-  `07:18:28.037 Wi-Fi religado`, mais `Bluetooth nao ligou pelo svc — tentando pelo
-  BluetoothAdapter`.
+A v1.9.0–1.11.0 derrubava e religava (10 s, depois 1 min), para que os rádios voltassem
+quentes e a partida seguinte fosse rápida. Duas medições de 12→15/09 derrubaram a
+premissa **e** a solução:
 
-E o estado misto é o pior de todos, medido: com `wlan2` caída e Bluetooth ligado, o AA
-não funciona **e** o áudio do telefone fica preso no carro.
+| Medição | O que mostrou |
+|---|---|
+| `uptime do device` em todo arranque (11–14 s) + heartbeat pós-tranca parando sempre em 3 min | a ROM desliga a central 3–4 min depois da tranca, e toda ignição é **boot frio**. Não existe partida quente, então guardar rádio ligado não acelera nada |
+| verificação aos 15/30/60 s em 3 trancas | o telefone **reconectou em menos de 15 s em 2 delas** (IP novo na `wlan2`). Religar era o que devolvia a sessão a um carro vazio |
 
-Cinco proteções, cada uma por um motivo observado:
+Ou seja: a metade "religar" custava a solução e não comprava nada.
+
+#### Três saídas, e só três
+
+| Saída | O que faz |
+|---|---|
+| a ROM desliga a central (normal) | nada — não há o que restaurar, e o boot seguinte traz tudo ligado |
+| destranque ou ignição | religa na hora: o motorista voltou |
+| teto de `HOLD_MAX_MS` (10 min) | proteção para o caso de a central não desligar; na prática quase nunca dispara |
+
+#### Proteções, cada uma por um motivo observado
 
 | Proteção | Por quê |
 |---|---|
-| `bounceInProgress` + a guarda de broadcast | a ROM religou o Bluetooth 3× em ~3 s no log de 08/09; sem guarda a janela é engolida. Limpo **antes** de religar, senão a guarda reverte a própria restauração |
-| `bounceGuardTick()` re-agendado a cada 5 s | não existe broadcast para "a interface reassociou", então essa metade é por polling. Com 10 s uma conferência no meio bastava; com 1 minuto ela deixaria 55 s sem vigilância |
-| `BOUNCE_PENDING` em disco + `recoverFromInterruptedBounce()` | com 1 minuto de janela, ser morto no meio dela virou caminho esperado (24 criações × 2 destruições no log de 08/09). Sem isso a central acorda com os rádios desligados e ninguém para religar |
-| `ensureAawInterfaceUp()` na ignição | cobre a interface ficar caída por fora do pisca — o teste manual "Derrubar wlan2" não a levanta de volta |
+| `holdGuardTick()` a cada 5 s | `ndc ... down` **não é durável**: numa janela de 1 min o supplicant reassociou **11 vezes**, uma a cada 5 s. Sem a guarda o log diria "derrubado" com a sessão de pé o tempo todo |
+| `holdInProgress` + a guarda de broadcast | a ROM religou o Bluetooth 3× em ~3 s no log de 08/09. Limpo **antes** de religar, senão reverte a própria restauração |
+| `HOLD_PENDING` em disco + `recoverFromInterruptedHold()` | a ROM mata este processo com frequência (24 criações × 2 destruições). Sem isso a central acorda com os rádios derrubados e ninguém para religar |
+| `ensureAawInterfaceUp()` na ignição | cobre a interface ficar caída por fora do hold — o teste manual "Derrubar wlan2" não a levanta |
 | ciclo completo de `svc wifi` se o `ndc up` não pegar | com a `wlan2` caída o AA não funciona; custa segundos e leva o Wi-Fi de casa, mas o alternativo é AAW quebrado até o boot |
 
-Destrancar dentro da janela cancela e religa na hora — o motorista voltou, e fazê-lo
-esperar o resto do minuto seria o contrário do objetivo.
+O resumo da guarda sai a cada `HOLD_LOG_EVERY` passagens (~1 min). Uma linha por
+reassociação seriam 11 por minuto e encheriam o log rotativo de 192 KB. **A última dessas
+linhas antes do silêncio é o registro de quando a ROM desligou a central** — foi por isso
+que o heartbeat dedicado da v1.11.0 saiu.
 
-**A pergunta aberta** é uma só: com os rádios de volta, o telefone reconecta o AA
-sozinho? Se reconectar, a sessão volta a projetar num carro vazio e o pisca não resolve.
-`scheduleBounceVerification()` registra `wlan2`, processos de projeção e o aparelho
-Bluetooth conectado em 15 s, 30 s e 60 s — um ciclo de teste responde.
+### Desligar a central não existe (medido 14–15/09)
 
-### A central já boota do zero a cada uso (medido 05→08/09)
+`svc power shutdown` **reinicia**, não desliga. Três rodadas idênticas: o processo morre
+no comando e ~21–25 s depois volta um processo novo com `uptime do device 11s`. O comando
+funciona — a central desliga de verdade — mas o power manager a traz de volta, porque ela
+é alimentada pelo carro. Os outros três degraus da escada nunca rodaram: o primeiro matou
+o processo e a escada parou ali.
 
-O `uptime do device` que o `PersistentLog` grava a cada arranque responde uma pergunta
-que nunca tinha sido feita: **em 15 sessões, o serviço sempre sobe com o device entre
-11 s e 14 s de uptime**. O uptime zerar — em vez de acumular, como aconteceria num sleep
-— significa kernel reiniciado.
-
-Consequência prática: a central não dorme entre usos, ela desliga e boota. Isso derruba
-a objeção óbvia a desligá-la à mão na tranca — **não custaria nada na partida seguinte**,
-que ia ser um boot frio de qualquer jeito.
-
-O que ainda falta para decidir é o tamanho do prêmio: por quanto tempo a ROM mantém a
-central ligada depois da tranca. O log não respondia, porque a última linha de cada
-sessão era sempre a verificação agendada do pisca — "as linhas pararam" não distinguia
-"a central desligou" de "acabou o que havia para logar". Daí o **heartbeat pós-tranca**
-(`HEARTBEAT_INTERVAL_MS`, 20 marcações de 1 min): a última marcação antes do silêncio dá
-a resposta com ~1 min de resolução.
+Sem cortar a alimentação, não há desligar. O que essa medição rendeu de útil foi o número
+de 3–4 min, que é o que hoje encerra o hold.
 
 ### Testes manuais — botão Teste AAW
 
-`utils/ProjectionProbe.kt`, três botões separados. Os dois primeiros já responderam
-(acima) e ficam como instrumento para medir de novo se a ROM ou o telefone mudarem.
+`utils/ProjectionProbe.kt`, três botões separados. Os três já responderam (acima) e ficam
+como instrumento para medir de novo se a ROM ou o telefone mudarem.
 
-**Desligar a central** é o terceiro e ainda não rodou. Escada de `svc power shutdown` →
-`reboot -p` → activity de `ACTION_REQUEST_SHUTDOWN` → `setprop sys.powerctl shutdown`,
-com 6 s de espera entre os degraus porque um shutdown ordenado não é instantâneo.
+**Desligar a central** já rodou e respondeu (acima): reinicia. A escada
+(`svc power shutdown` → `reboot -p` → `ACTION_REQUEST_SHUTDOWN` →
+`setprop sys.powerctl shutdown`) parou no primeiro degrau, então os outros três seguem
+sem medição.
 
 **Cuidados.** "Derrubar wlan2" derruba e **não levanta de volta** — quem restaura é o
-pisca ou o `ensureAawInterfaceUp()` da ignição. E "Desligar a central" é o único teste do
+hold ou o `ensureAawInterfaceUp()` da ignição. E "Desligar a central" é o único teste do
 qual o app **não tem como se recuperar**: todos os outros têm rede de segurança no
 arranque do serviço, e aqui o serviço deixa de existir. Cada tentativa é precedida de
 `PersistentLog.flush()`, senão a linha que diz qual comando estava sendo tentado morreria

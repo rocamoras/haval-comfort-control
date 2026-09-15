@@ -107,46 +107,50 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * wlan2 caida e o Bluetooth ligado, o AA nao funciona e o audio do telefone fica
      * preso no carro.
      *
-     * Piscar resolve os dois lados: a sessao cai na tranca e os radios voltam quentes
-     * para a proxima partida.
+     * ATE A v1.11.0 ISTO ERA UM "PISCA" — derrubava e religava depois de 1 minuto, para
+     * que os radios voltassem quentes e a proxima partida fosse rapida. Duas medicoes de
+     * 12 a 15/09/2026 derrubaram essa premissa e essa solucao:
      *
-     * 1 minuto, calibrado em campo: 10 s derrubavam a sessao, mas eram curtos demais
-     * para o telefone desistir dela. O preco de uma janela seis vezes maior e a chance de
-     * a ROM matar este processo no meio — o que faz a rede de seguranca do BOUNCE_PENDING
-     * deixar de ser precaucao e virar caminho esperado de vez em quando.
-     */
-    private static final long BOUNCE_OFF_MS = 60_000;
-    /**
-     * Intervalo da guarda DENTRO da janela, re-agendada ate o fim dela.
+     * 1. NAO EXISTE PARTIDA QUENTE. O `uptime do device` zera a cada arranque (sempre
+     *    11-14 s quando o servico sobe), e o heartbeat pos-tranca mostrou a ROM desligando
+     *    a central entre 3 e 4 minutos depois da tranca — marcacoes de 1, 2 e 3 min e
+     *    entao silencio ate o proximo boot, horas depois. Toda ignicao e boot frio, entao
+     *    guardar radio ligado nao acelera nada.
+     * 2. RELIGAR DEVOLVIA A SESSAO. Nas tres trancas com verificacao, o telefone
+     *    reconectou em menos de 15 s em DUAS (IP novo na wlan2 aos 15 s, 30 s e 60 s).
      *
-     * Com 10 s uma unica conferencia no meio cobria a janela; com 1 minuto ela deixaria
-     * 55 s sem vigilancia, e tanto a ROM (que religou o Bluetooth 3x em ~3 s no log de
-     * 08/09) quanto o supplicant tem tempo de sobra para desfazer o pisca.
+     * Entao agora derruba e SEGURA. Quem encerra e a propria ROM, desligando a central.
+     * Isto aqui e so o teto de seguranca: se por algum motivo ela nao desligar, os radios
+     * nao ficam fora para sempre.
      */
-    private static final long BOUNCE_GUARD_INTERVAL_MS = 5_000;
+    private static final long HOLD_MAX_MS = 10 * 60_000;
     /**
-     * Conferencias depois de religar. Existem para responder a UNICA pergunta que o
-     * pisca deixa em aberto: com os radios de volta, o telefone reconecta o AA sozinho?
-     * Se reconectar, a sessao volta a projetar num carro vazio e o pisca nao serve.
+     * Intervalo da guarda, re-agendada ate o fim do hold.
+     *
+     * A guarda NAO e precaucao: `ndc interface setcfg wlan2 down` nao e duravel. Numa
+     * janela de 1 minuto do log de 12/09 o supplicant reassociou ONZE vezes seguidas, uma
+     * a cada 5 s, e a guarda teve de derrubar todas. Sem ela o log diria "derrubado" com
+     * a sessao de pe o tempo todo. O Bluetooth tem o mesmo problema pelo lado da ROM.
      */
-    private static final long[] BOUNCE_VERIFY_DELAYS_MS = {15_000, 30_000, 60_000};
+    private static final long HOLD_GUARD_INTERVAL_MS = 5_000;
+    /**
+     * De quantas em quantas passagens da guarda sai uma linha de resumo.
+     *
+     * Uma linha por reassociacao encheria o log: 11 por minuto medidos, e o hold pode
+     * durar minutos. A cada 12 passagens da um resumo por minuto — e a ULTIMA linha antes
+     * do silencio passa a ser o registro de quando a ROM desligou a central, que e o que
+     * o heartbeat da v1.11.0 media (e por isso ele saiu).
+     */
+    private static final int HOLD_LOG_EVERY = 12;
+    /**
+     * Conferencias depois de religar. Hoje o caminho normal e a ROM desligar a central e
+     * ninguem religar nada — estas linhas so aparecem quando o hold termina por
+     * destranque, ignicao ou pelo teto, que sao justamente os casos em que vale saber se
+     * a sessao voltou.
+     */
+    private static final long[] RESTORE_VERIFY_DELAYS_MS = {15_000, 30_000, 60_000};
     /** Espera entre o disable e o enable no fallback de ciclo completo de Wi-Fi. */
     private static final long WIFI_CYCLE_GAP_MS = 2_000;
-    /**
-     * Heartbeat depois da tranca — existe para medir UMA coisa: por quanto tempo a ROM
-     * mantem a central ligada depois que o carro e trancado.
-     *
-     * Esse numero e o tamanho do premio de desligar a central a mao, e o log nao o tinha:
-     * a ultima linha de cada sessao era sempre a verificacao agendada do pisca, nao o
-     * desligamento, entao "as linhas pararam" nao distinguia "a central desligou" de
-     * "acabou o que havia para logar". Com o heartbeat, a ultima marcacao antes do
-     * silencio responde com ~1 min de resolucao.
-     *
-     * Teto de 20 marcacoes: o log rotativo tem 192 KB e a evidencia do pisca vale mais
-     * que a vigesima primeira linha de "central viva".
-     */
-    private static final long HEARTBEAT_INTERVAL_MS = 60_000;
-    private static final int  HEARTBEAT_MAX         = 20;
     /** Pistas para descobrir no log um receiver diferente destes, se houver. */
     private static final String[] PROJECTION_HINTS = {
             "androidauto", "gearhead", "carlife", "carplay", "hicar", "zlink", "easyconn"
@@ -237,14 +241,18 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      */
     private boolean lockActionDone = false;
     /**
-     * Estamos dentro da janela de {@link #BOUNCE_OFF_MS} do pisca.
+     * Estamos segurando os radios derrubados desde a tranca.
      *
      * Serve para a MESMA guarda de radioGuardReceiver: o log de 08/09 mostra a ROM
      * religando o Bluetooth tres vezes em ~3 s depois de desligarmos, e sem guarda a
-     * janela do pisca seria engolida. E limpo ANTES de religarmos, senao a guarda
-     * reverteria a nossa propria restauracao.
+     * hold seria engolido. E limpo ANTES de religarmos, senao a guarda reverteria a nossa
+     * propria restauracao.
      */
-    private boolean bounceInProgress = false;
+    private boolean holdInProgress = false;
+    /** Passagens da guarda no hold atual, para espacar as linhas de resumo. */
+    private int holdTicks = 0;
+    /** Quantas vezes tivemos de derrubar de novo neste hold — o supplicant insiste. */
+    private int holdReDrops = 0;
     /** Reavaliacoes restantes da tranca; ver LOCK_RECHECK_DELAY_MS. */
     private int lockRechecksLeft = 0;
 
@@ -253,18 +261,15 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
 
     private final Runnable uiPushRunnable = this::pushUiState;
     /**
-     * Em campo, e nao `this::bounceRestore` inline: cada referencia de metodo cria um
-     * objeto novo, e o removeCallbacks do cancelamento antecipado nao casaria com o que
-     * foi enfileirado.
+     * Em campo, e nao `this::metodo` inline: cada referencia de metodo cria um objeto
+     * novo, e o removeCallbacks do cancelamento antecipado nao casaria com o que foi
+     * enfileirado.
      */
-    private final Runnable bounceRestoreRunnable = this::bounceRestore;
-    private final Runnable bounceGuardRunnable   = this::bounceGuardTick;
-    private final Runnable heartbeatRunnable     = this::heartbeatTick;
+    private final Runnable holdCapRunnable   = this::endHoldByCap;
+    private final Runnable holdGuardRunnable = this::holdGuardTick;
 
-    /** Marcacoes restantes do heartbeat pos-tranca; 0 = desligado. */
-    private int  heartbeatsLeft = 0;
-    /** elapsedRealtime da tranca, base do "N min apos a tranca". */
-    private long lockedAtMs     = 0;
+    /** elapsedRealtime da tranca, base do "N min apos a tranca" nos resumos. */
+    private long lockedAtMs = 0;
 
     /**
      * Chaves que disparam acao. vehicle_speed, gear_status e engine_state ficam DE
@@ -495,8 +500,8 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         lastReady = isReady;
 
         // Antes de qualquer outra coisa, e independente de o carro estar ligado: se a ROM
-        // nos matou no meio de um pisca, os radios estao desligados e ninguem sabe disso.
-        recoverFromInterruptedBounce();
+        // nos matou no meio de um hold, os radios estao desligados e ninguem sabe disso.
+        recoverFromInterruptedHold();
 
         if (prefs.getBoolean(Prefs.KEEP_DISTRACTION_DISABLED, Prefs.DEF_KEEP_DISTRACTION_DISABLED)
                 && "1".equals(dataCache.get(CarProps.DISTRACTION))) {
@@ -549,7 +554,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             // Carro ligou: a proxima trancada volta a poder agir, mesmo que o destrancar
             // nao tenha sido observado.
             lockActionDone = false;
-            stopPostLockHeartbeat("ignicao");
+            endHold("ignicao");
             // ORDEM E LATENCIA: o volume e uma unica chamada de binder e resolve na
             // hora; Bluetooth e ancora precisam criar processos via Shizuku, o que
             // custa dezenas/centenas de ms. Volume primeiro, sempre.
@@ -582,17 +587,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             // Destrancou: libera para agir na proxima trancada e para de reverter os
             // radios, senao a guarda brigaria com o usuario que acabou de voltar.
             if (lockActionDone) log("carro destrancado");
-            // Destrancou dentro da janela do pisca: o motorista voltou, e faze-lo esperar
-            // o resto dos 10 s por Bluetooth e Wi-Fi seria o contrario do objetivo.
-            if (bounceInProgress) {
-                react.removeCallbacks(bounceGuardRunnable);
-                react.removeCallbacks(bounceRestoreRunnable);
-                log("destrancou dentro da janela do pisca — religando agora");
-                bounceRestore();
-            }
+            // Destrancou: o motorista voltou, e deixa-lo sem Bluetooth e sem Wi-Fi ate a
+            // central desligar seria o contrario do objetivo.
+            endHold("destranque");
             lockActionDone   = false;
             lockRechecksLeft = 0;
-            stopPostLockHeartbeat("destranque");
             return;
         }
         if (!DOOR_LOCKED.equals(value)) return;
@@ -670,62 +669,27 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      *
      * Havia aqui dois modos alternativos, "Bluetooth (invasivo)" e "Wi-Fi (invasivo)",
      * que desligavam o radio inteiro e SO religavam na ignicao. Sairam na v1.10.0: o
-     * pisca faz o mesmo servico sem deixar a central sem internet nem viva-voz enquanto o
-     * carro esta trancado, e sem pagar o religamento na partida. Manter os tres era
-     * manter dois modos que brigam — o pisca religa por projeto, e a guarda do modo
-     * invasivo revertia justamente esse religamento.
+     * hold faz o mesmo servico com um teto de seguranca e religando no destranque, e
+     * manter os tres era manter modos que brigam entre si.
      */
     private void applyDisconnectOnLock() {
-        if (!prefs.getBoolean(Prefs.BOUNCE_RADIOS_ON_LOCK, Prefs.DEF_BOUNCE_RADIOS)) {
+        if (!prefs.getBoolean(Prefs.DISCONNECT_ON_LOCK, Prefs.DEF_DISCONNECT_ON_LOCK)) {
             log("desativar ao trancar esta desligado — nada a fazer");
             return;
         }
-        dumpProjectionDiagnostics("antes do pisca");
-        bounceRadios();
-        startPostLockHeartbeat();
+        dumpProjectionDiagnostics("antes de derrubar");
+        dropAndHoldRadios();
         pushUiState();
     }
 
     /**
-     * Comeca a marcar presenca a cada minuto. Nao ha nada de automatico nisto: e pura
-     * medicao, e a linha que importa e a ULTIMA — a que vem antes de a central desligar.
-     */
-    private void startPostLockHeartbeat() {
-        lockedAtMs     = SystemClock.elapsedRealtime();
-        heartbeatsLeft = HEARTBEAT_MAX;
-        react.removeCallbacks(heartbeatRunnable);
-        react.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
-    }
-
-    private void heartbeatTick() {
-        long minutos = (SystemClock.elapsedRealtime() - lockedAtMs) / 60_000;
-        if (--heartbeatsLeft <= 0) {
-            PersistentLog.w(TAG, "heartbeat: " + minutos + " min apos a tranca e a central"
-                    + " segue viva — fim das marcacoes");
-            return;
-        }
-        PersistentLog.w(TAG, "heartbeat: central viva " + minutos + " min apos a tranca");
-        react.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
-    }
-
-    /** Fim do ciclo (ignicao ou destranque): a central seguiu viva ate aqui. */
-    private void stopPostLockHeartbeat(String motivo) {
-        if (heartbeatsLeft <= 0) return;
-        long minutos = (SystemClock.elapsedRealtime() - lockedAtMs) / 60_000;
-        heartbeatsLeft = 0;
-        react.removeCallbacks(heartbeatRunnable);
-        PersistentLog.w(TAG, "heartbeat: parado por " + motivo + " — a central ficou viva"
-                + " pelo menos " + minutos + " min apos a tranca");
-    }
-
-    /**
-     * Guarda da janela do pisca: a central religa o Bluetooth por conta propria depois
-     * que desligamos — tres vezes em ~3 s no log de 08/09 18:38. Sem este receiver a
-     * janela seria engolida e o pisca nao surtiria efeito.
+     * Guarda do hold: a central religa o Bluetooth por conta propria depois que
+     * desligamos — tres vezes em ~3 s no log de 08/09 18:38. Sem este receiver o hold
+     * seria engolido e nao surtiria efeito.
      *
-     * O ramo do Wi-Fi saiu junto com o modo invasivo: o pisca nao mexe no `svc wifi`, ele
+     * O ramo do Wi-Fi saiu junto com o modo invasivo: o hold nao mexe no `svc wifi`, ele
      * derruba a interface pelo `ndc`, o que nao emite WIFI_STATE_CHANGED. Quem vigia a
-     * interface e bounceGuardTick(), por polling, porque nao existe broadcast para isso.
+     * interface e holdGuardTick(), por polling, porque nao existe broadcast para isso.
      */
     private void registerRadioGuard() {
         radioGuardReceiver = new BroadcastReceiver() {
@@ -738,11 +702,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
                             BluetoothAdapter.ERROR);
                     if (state != BluetoothAdapter.STATE_ON) return;
                     react.post(() -> {
-                        // Nao consulta pref nenhuma: quem decidiu desligar foi o pisca, e
-                        // enquanto a janela dele esta aberta ele manda.
-                        if (bounceInProgress) {
+                        // Nao consulta pref nenhuma: quem decidiu desligar foi o hold, e
+                        // enquanto ele esta de pe e ele quem manda.
+                        if (holdInProgress) {
                             setBluetoothEnabled(false);
-                            log("pisca: Bluetooth religou na janela, desligado de novo");
+                            holdReDrops++;
                         }
                         pushUiState();
                     });
@@ -904,13 +868,11 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     }
 
     /**
-     * O "pisca" dos radios — acao PRINCIPAL da funcionalidade 2.
+     * Derruba a interface do AAW e o Bluetooth na tranca — e SEGURA derrubados.
      *
-     * Derruba a interface do AAW e o Bluetooth por {@link #BOUNCE_OFF_MS} e religa os
-     * dois na MESMA ordem. O objetivo e duplo, e e o que distingue isto do desligamento
-     * permanente dos toggles invasivos: a sessao do Android Auto cai no instante da
-     * tranca, e os radios voltam quentes para que a partida seguinte nao pague o custo
-     * de religar (~2 s medidos no log de 09/09, mais o fallback do BluetoothAdapter).
+     * Quem encerra o hold, no caminho normal, e a propria ROM desligando a central 3 a 4
+     * minutos depois da tranca. Ver {@link #HOLD_MAX_MS} para por que isto deixou de ser
+     * um "pisca" com religamento em 1 minuto.
      *
      * A ordem — interface primeiro, Bluetooth depois — nao e arbitraria: o link e o que
      * sustenta a sessao de projecao, e o Bluetooth e o que mantem o audio do telefone
@@ -918,69 +880,99 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
      * resultado foi o pior dos dois mundos: AA sem funcionar E audio capturado.
      *
      * Roda inteiro na thread react, com postDelayed em vez de sleep — a thread precisa
-     * seguir atendendo onDataChanged durante os 10 s.
+     * seguir atendendo onDataChanged durante todo o hold.
      */
-    private void bounceRadios() {
+    private void dropAndHoldRadios() {
         boolean btWasOn   = isBluetoothOn();
         boolean wifiWasOn = isWifiOn();
-        // Persistido ANTES de tocar em radio: a janela de 10 s e exatamente quando a ROM
-        // costuma matar este processo (24 criacoes contra 2 destruicoes no log de 08/09),
-        // e a rede de seguranca do arranque depende desta flag ja estar em disco.
+        // Persistido ANTES de tocar em radio: a ROM mata este processo com frequencia (24
+        // criacoes contra 2 destruicoes no log de 08/09), e a rede de seguranca do
+        // arranque depende desta flag ja estar em disco.
         prefs.edit()
-                .putBoolean(Prefs.BOUNCE_PENDING, true)
-                .putBoolean(Prefs.BOUNCE_BT_WAS_ON, btWasOn)
-                .putBoolean(Prefs.BOUNCE_WIFI_WAS_ON, wifiWasOn)
+                .putBoolean(Prefs.HOLD_PENDING, true)
+                .putBoolean(Prefs.HOLD_BT_WAS_ON, btWasOn)
+                .putBoolean(Prefs.HOLD_WIFI_WAS_ON, wifiWasOn)
                 .apply();
-        bounceInProgress = true;
+        holdInProgress = true;
+        holdTicks      = 0;
+        holdReDrops    = 0;
+        lockedAtMs     = SystemClock.elapsedRealtime();
 
-        log("pisca: derrubando " + AawLink.IFACE + " e Bluetooth por "
-                + (BOUNCE_OFF_MS / 1000) + "s");
+        log("derrubando " + AawLink.IFACE + " e Bluetooth — segura ate a central desligar"
+                + " (teto de " + (HOLD_MAX_MS / 60_000) + " min)");
         AawLink.setUp(false);
         if (btWasOn) setBluetoothEnabled(false);
-        else log("pisca: Bluetooth ja estava desligado");
+        else log("Bluetooth ja estava desligado");
 
-        react.postDelayed(bounceGuardRunnable,   BOUNCE_GUARD_INTERVAL_MS);
-        react.postDelayed(bounceRestoreRunnable, BOUNCE_OFF_MS);
+        react.postDelayed(holdGuardRunnable, HOLD_GUARD_INTERVAL_MS);
+        react.postDelayed(holdCapRunnable,   HOLD_MAX_MS);
     }
 
     /**
-     * Metade da janela: se a interface reassociou sozinha, a sessao voltou e o pisca
-     * teria sido inofensivo. Derruba de novo e deixa isso registrado — se aparecer no
-     * log, a janela precisa de uma guarda de verdade e nao de uma conferencia.
+     * Uma passagem da guarda: se o supplicant reassociou, derruba de novo.
+     *
+     * Silenciosa de proposito — quem fala e o resumo a cada {@link #HOLD_LOG_EVERY}
+     * passagens. Uma linha por reassociacao seriam 11 por minuto, medidos em 12/09, e o
+     * hold dura minutos: encheria o log rotativo de 192 KB e empurraria para fora a
+     * evidencia que importa.
      */
-    private void bounceGuardTick() {
-        if (!bounceInProgress) return;
+    private void holdGuardTick() {
+        if (!holdInProgress) return;
         if (AawLink.ipv4() != null) {
-            log("pisca: " + AawLink.IFACE + " reassociou dentro da janela — derrubando de novo");
-            AawLink.setUp(false);
+            AawLink.setUpQuietly(false);
+            holdReDrops++;
         }
-        react.postDelayed(bounceGuardRunnable, BOUNCE_GUARD_INTERVAL_MS);
+        if (++holdTicks % HOLD_LOG_EVERY == 0) {
+            // Esta linha faz o servico do antigo heartbeat: a ultima que sair antes do
+            // silencio e o registro de quando a ROM desligou a central.
+            PersistentLog.w(TAG, "hold: " + minutosDesdeATranca() + " min apos a tranca, "
+                    + AawLink.IFACE + " ip=" + (AawLink.ipv4() == null ? "(nenhum)" : "VOLTOU")
+                    + ", bt=" + (isBluetoothOn() ? "ON (!)" : "off")
+                    + ", re-derrubadas=" + holdReDrops);
+        }
+        react.postDelayed(holdGuardRunnable, HOLD_GUARD_INTERVAL_MS);
     }
 
-    private void bounceRestore() {
-        boolean btWasOn   = prefs.getBoolean(Prefs.BOUNCE_BT_WAS_ON, false);
-        boolean wifiWasOn = prefs.getBoolean(Prefs.BOUNCE_WIFI_WAS_ON, false);
-        // Limpo ANTES de religar: com o flag de pe, radioGuardReceiver reverteria a
-        // nossa propria restauracao do Bluetooth.
-        bounceInProgress = false;
-        // A guarda se re-agenda sozinha; sem isto ela seguiria acordando depois do fim.
-        react.removeCallbacks(bounceGuardRunnable);
-        restoreRadiosAfterBounce(btWasOn, wifiWasOn, "pisca");
-        scheduleBounceVerification();
+    private long minutosDesdeATranca() {
+        return (SystemClock.elapsedRealtime() - lockedAtMs) / 60_000;
+    }
+
+    /** Teto de seguranca: a ROM nao desligou a central, entao devolvemos os radios. */
+    private void endHoldByCap() {
+        endHold("teto de " + (HOLD_MAX_MS / 60_000) + " min");
     }
 
     /**
-     * Religa o que o pisca desligou. Compartilhado com a recuperacao do arranque, para
-     * que os dois caminhos religuem exatamente igual.
+     * Encerra o hold e devolve os radios. Chamado pelo destranque, pela ignicao e pelo
+     * teto — e por nada mais: no caminho normal a central desliga antes de qualquer um
+     * dos tres, e nao ha o que restaurar.
      */
-    private void restoreRadiosAfterBounce(boolean btWasOn, boolean wifiWasOn, String origem) {
+    private void endHold(String motivo) {
+        if (!holdInProgress) return;
+        boolean btWasOn   = prefs.getBoolean(Prefs.HOLD_BT_WAS_ON, false);
+        boolean wifiWasOn = prefs.getBoolean(Prefs.HOLD_WIFI_WAS_ON, false);
+        // Limpo ANTES de religar: com o flag de pe, radioGuardReceiver e a guarda
+        // reverteriam a nossa propria restauracao.
+        holdInProgress = false;
+        react.removeCallbacks(holdGuardRunnable);
+        react.removeCallbacks(holdCapRunnable);
+        log("hold encerrado por " + motivo + " apos " + minutosDesdeATranca() + " min ("
+                + holdReDrops + " re-derrubadas)");
+        restoreRadios(btWasOn, wifiWasOn, motivo);
+        scheduleRestoreVerification();
+    }
+
+    /**
+     * Religa o que o hold desligou. Compartilhado com a recuperacao do arranque, para que
+     * os dois caminhos religuem exatamente igual.
+     */
+    private void restoreRadios(boolean btWasOn, boolean wifiWasOn, String origem) {
         boolean subiu = AawLink.setUp(true);
         if (!subiu && wifiWasOn) {
             // Medido em 09/09: com a wlan2 caida o AA simplesmente nao funciona. Se o
             // `ndc up` nao recupera a interface, o ciclo completo de Wi-Fi a reconstroi.
             // Custa segundos e derruba o Wi-Fi de casa junto — mas a alternativa e o AAW
-            // quebrado ate o proximo boot, que foi o estado em que o teste deixou a
-            // central.
+            // quebrado ate o proximo boot.
             log(origem + ": " + AawLink.IFACE
                     + " nao subiu pelo ndc — ciclo completo de Wi-Fi como ultimo recurso");
             setWifiEnabled(false);
@@ -989,24 +981,19 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
         if (btWasOn) setBluetoothEnabled(true);
         log(origem + ": religado (" + AawLink.IFACE + "=" + (subiu ? "up" : "AINDA DOWN")
                 + ", bluetooth=" + (btWasOn ? "religado" : "seguiu desligado") + ")");
-        prefs.edit().putBoolean(Prefs.BOUNCE_PENDING, false).apply();
+        prefs.edit().putBoolean(Prefs.HOLD_PENDING, false).apply();
         pushUiState();
     }
 
     /**
-     * A unica pergunta que o pisca deixa em aberto: com os radios de volta, o telefone
-     * reconecta o Android Auto sozinho?
-     *
-     * Se reconectar, a sessao volta a projetar num carro vazio e o pisca nao resolve o
-     * problema — seria preciso segurar os radios desligados ate a proxima ignicao, ao
-     * custo da partida lenta. Se nao reconectar, o AAW so re-inicia num gatilho de
-     * ignicao e o pisca e exatamente a resposta certa. So o carro decide, e estas tres
-     * linhas no log e que vao dizer qual dos dois e.
+     * Depois de religar, a sessao volta? Medido em 12/09 com o antigo pisca: voltava em
+     * menos de 15 s em 2 de 3 trancas. Foi essa medicao que trocou o pisca pelo hold, e
+     * estas linhas seguem aqui para os casos em que ainda religamos.
      */
-    private void scheduleBounceVerification() {
-        for (long delay : BOUNCE_VERIFY_DELAYS_MS) {
+    private void scheduleRestoreVerification() {
+        for (long delay : RESTORE_VERIFY_DELAYS_MS) {
             react.postDelayed(() -> PersistentLog.w(TAG,
-                    "pisca " + (delay / 1000) + "s depois: " + AawLink.describe()
+                    "apos religar, " + (delay / 1000) + "s: " + AawLink.describe()
                             + " | projecao=" + AawLink.projectionProcessesLine()
                             + " | bt=" + (isBluetoothOn() ? "on" : "off")
                             + " " + AawLink.bluetoothConnectedLine()), delay);
@@ -1016,7 +1003,7 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     /**
      * Garante que a interface do AAW esta de pe quando o carro liga.
      *
-     * A rede de seguranca do arranque cobre a central acordando com o pisca
+     * A rede de seguranca do arranque cobre a central acordando com o hold
      * interrompido; esta cobre o resto — a interface ficar caida por qualquer motivo que
      * nao passou por nos (o teste manual do "Derrubar wlan2", por exemplo, que nao
      * levanta de volta). O requisito e "ao ligar o carro, conexao o mais rapido
@@ -1033,19 +1020,21 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
     /**
      * Rede de seguranca do arranque.
      *
-     * Se a ROM matou o processo dentro da janela do pisca, a central acorda com a
-     * interface caida e o Bluetooth desligado, e ninguem para religar. Nao e hipotese:
-     * e literalmente o estado em que o teste de 09/09 deixou a central — AA sem
-     * funcionar e, por o Bluetooth ter ficado conectado, o audio do telefone preso no
-     * carro.
+     * Se a ROM matou o processo durante o hold, a central acorda com a interface caida e
+     * o Bluetooth desligado, e ninguem para religar. Nao e hipotese: e literalmente o
+     * estado em que o teste manual de 09/09 deixou a central — AA sem funcionar e, por o
+     * Bluetooth ter ficado conectado, o audio do telefone preso no carro.
+     *
+     * Atencao a diferenca em relacao ao fim normal do hold: aqui o carro pode estar
+     * comecando um uso novo, entao religar e sempre certo.
      *
      * Roda em todo arranque do servico, com o carro ligado ou nao, porque a flag em
      * storage device-protected sobrevive a boot frio e e lida antes do unlock.
      */
-    private void recoverFromInterruptedBounce() {
-        if (!prefs.getBoolean(Prefs.BOUNCE_PENDING, false)) return;
-        boolean btWasOn   = prefs.getBoolean(Prefs.BOUNCE_BT_WAS_ON, false);
-        boolean wifiWasOn = prefs.getBoolean(Prefs.BOUNCE_WIFI_WAS_ON, false);
+    private void recoverFromInterruptedHold() {
+        if (!prefs.getBoolean(Prefs.HOLD_PENDING, false)) return;
+        boolean btWasOn   = prefs.getBoolean(Prefs.HOLD_BT_WAS_ON, false);
+        boolean wifiWasOn = prefs.getBoolean(Prefs.HOLD_WIFI_WAS_ON, false);
         boolean precisaIface = AawLink.isDown();
         boolean precisaBt    = btWasOn && !isBluetoothOn();
 
@@ -1053,14 +1042,14 @@ public class ComfortControlService extends Service implements Shizuku.OnBinderDe
             // Ja normalizou sozinho. A flag e consumida de qualquer forma: deixa-la de
             // pe faria um desligamento manual de radio muito depois ser "restaurado" num
             // arranque futuro — o mesmo cuidado que restoreBluetoothIfPending() toma.
-            prefs.edit().putBoolean(Prefs.BOUNCE_PENDING, false).apply();
-            log("pisca interrompido, mas os radios ja estavam normais — flag limpa");
+            prefs.edit().putBoolean(Prefs.HOLD_PENDING, false).apply();
+            log("hold interrompido, mas os radios ja estavam normais — flag limpa");
             return;
         }
-        log("pisca interrompido detectado no arranque (" + AawLink.IFACE
+        log("hold interrompido detectado no arranque (" + AawLink.IFACE
                 + (precisaIface ? "=DOWN" : "=up")
                 + ", bluetooth=" + (isBluetoothOn() ? "on" : "off") + ")");
-        restoreRadiosAfterBounce(btWasOn, wifiWasOn, "recuperacao do arranque");
+        restoreRadios(btWasOn, wifiWasOn, "recuperacao do arranque");
     }
 
     /**

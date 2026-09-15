@@ -4,7 +4,7 @@ package br.com.redesurftank.havalcomfortcontrol.utils
  * Primitivas do link do **Android Auto sem fio**, num lugar só.
  *
  * Existe porque duas partes precisam das mesmas: o [ProjectionProbe] (testes de campo) e
- * o `ComfortControlService` (o pisca dos rádios na tranca). Duplicar o comando do `ndc`
+ * o `ComfortControlService` (o hold dos rádios na tranca). Duplicar o comando do `ndc`
  * nos dois seria o mesmo tipo de erro que o `pidof` — um fato medido no carro escrito em
  * dois lugares, e um deles envelhecendo sozinho.
  *
@@ -93,6 +93,20 @@ object AawLink {
                 + " -> ${res.describeFailure()} | ${describe()}"
                 + if (chegou) "" else " | NAO PEGOU")
         return chegou
+    }
+
+    /**
+     * Igual a [setUp], mas sem escrever nada e sem o [describe] — que custa três shells.
+     *
+     * Existe para a guarda do hold, que derruba a interface de novo a cada 5 s enquanto o
+     * supplicant insiste em reassociar: onze vezes por minuto, medidas em 12/09. Uma
+     * linha e quatro shells por reassociação encheriam o log e a fila do Shizuku; quem
+     * conta a história é o resumo periódico do serviço.
+     */
+    @JvmStatic
+    fun setUpQuietly(up: Boolean): Boolean {
+        sh("ndc interface setcfg $IFACE ${if (up) "up" else "down"}")
+        return if (up) !isDown() else isDown()
     }
 
     /**

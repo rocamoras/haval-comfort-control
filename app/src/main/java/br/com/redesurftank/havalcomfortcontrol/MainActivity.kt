@@ -114,9 +114,9 @@ private fun ComfortScreen() {
         mutableStateOf(prefs.getBoolean(
             Prefs.CLOSE_WINDOWS_ON_LOCK, Prefs.DEF_CLOSE_WINDOWS_ON_LOCK))
     }
-    var bounceRadios by remember {
+    var disconnectOnLock by remember {
         mutableStateOf(prefs.getBoolean(
-            Prefs.BOUNCE_RADIOS_ON_LOCK, Prefs.DEF_BOUNCE_RADIOS))
+            Prefs.DISCONNECT_ON_LOCK, Prefs.DEF_DISCONNECT_ON_LOCK))
     }
     var keepDistractionOff by remember {
         mutableStateOf(prefs.getBoolean(
@@ -156,7 +156,7 @@ private fun ComfortScreen() {
     // Testes de campo do Android Auto sem fio. Os dois já responderam (09/09): matar
     // processo não derruba a sessão, e só o `ndc` derruba a interface. Ficam como
     // instrumento — ver ProjectionProbe para os números. Atenção: "Derrubar wlan2" não
-    // levanta a interface de volta; quem restaura é o pisca do serviço.
+    // levanta a interface de volta; quem restaura é o hold do serviço ou a ignição.
     var showProbeDialog by remember { mutableStateOf(false) }
     var probeReport     by remember { mutableStateOf("") }
     var probeRunning    by remember { mutableStateOf("") }
@@ -427,13 +427,13 @@ private fun ComfortScreen() {
                 modifier = Modifier.weight(1f),
                 title = "Desconectar ao trancar",
                 description = "Ao trancar o carro, derruba a interface do Android Auto sem "
-                        + "fio e o Bluetooth por 1 minuto e religa em seguida: a sessão cai "
-                        + "na hora e os rádios voltam quentes, para a próxima partida não "
-                        + "pagar o custo de religar.",
+                        + "fio e o Bluetooth e os mantém derrubados até a central se "
+                        + "desligar sozinha, uns 3 a 4 minutos depois. Destrancar ou dar "
+                        + "a partida religa na hora.",
                 toggles = listOf(
-                    Toggle("Desativar", bounceRadios) {
-                        bounceRadios = it
-                        prefs.edit().putBoolean(Prefs.BOUNCE_RADIOS_ON_LOCK, it).apply()
+                    Toggle("Desativar", disconnectOnLock) {
+                        disconnectOnLock = it
+                        prefs.edit().putBoolean(Prefs.DISCONNECT_ON_LOCK, it).apply()
                     },
                 )
             )
